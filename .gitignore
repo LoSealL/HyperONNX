@@ -1,0 +1,16 @@
+.*/
+!.github/
+*.egg-info
+__pycache__
+# pdm build tool
+.pdm-python
+__pypackages__/
+# pypa
+dist/
+build/
+tests/models/
+!tests/models/.gitkeep
+!tests/models/model.list
+
+uv.lock
+.coverage

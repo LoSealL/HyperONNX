@@ -1,0 +1,29 @@
+name: check coding styles
+run-name: ${{ github.actor }} lint
+on:
+  pull_request:
+    paths:
+      - 'hyperonnx/**'
+      - 'tests/**'
+jobs:
+  run-lint-public:
+    runs-on: [ubuntu-latest]
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/Jod
+      - name: pyright type check
+        run: |
+          uv sync --extra=test -U
+          uv run pyright hyperonnx
+          uv run pre-commit run -s HEAD^ -o HEAD

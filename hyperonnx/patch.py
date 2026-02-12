@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import importlib
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -27,8 +28,8 @@ def patch_transformers():
     :func:`~transformers.masking_utils.sdpa_mask_recent_torch` uses `torch.vmap`
     to index 4D mask, which is not supported well in torch onnx exporter.
     """
-    # pylint: disable=import-outside-toplevel
-    import transformers
+    # pylint: disable=invalid-name, unused-argument
+    transformers = importlib.import_module("transformers")
 
     TRANSFORMERS_HAS_SDPA_ATTENTION = Version("4.48.0")
     TRANSFORMERS_HAS_SDPA_MASK = Version("4.53.0")
@@ -37,10 +38,9 @@ def patch_transformers():
 
     patches = []
     if TRANSFORMERS_HAS_SDPA_MASK <= CURR_VER < TRANSFORMERS_FIX_VMAP:
-        from transformers.masking_utils import (
-            ALL_MASK_ATTENTION_FUNCTIONS,
-            sdpa_mask_older_torch,
-        )
+        masking_utils = importlib.import_module(".masking_utils", "transformers")
+        ALL_MASK_ATTENTION_FUNCTIONS = masking_utils.ALL_MASK_ATTENTION_FUNCTIONS
+        sdpa_mask_older_torch = masking_utils.sdpa_mask_older_torch
 
         # need to patch sdpa_mask to older version
         # But after 5.0.0 use_vmap is False by default

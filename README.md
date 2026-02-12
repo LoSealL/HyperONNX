@@ -2,7 +2,7 @@
 
 [中文](./README_CN.md)|[EN](./README.md)
 
-Hyper-ONNX can export pytorch models (`nn.Module`) in a hierachical manner. It can keep the module hier information and make a nested onnx graph. ✨
+Hyper-ONNX can export pytorch models (`nn.Module`) in a hierarchical manner. It can keep the module hier information and make a nested onnx graph. ✨
 
 
 ## 📦 Install

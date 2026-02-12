@@ -11,6 +11,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12"]
+        transformers-version: ["4.53.0", "5.1.0"]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -24,6 +25,7 @@ jobs:
           node-version: lts/Jod
       - name: pyright type check
         run: |
-          uv sync --extra=test -U
+          uv sync --dev --extra=cpu
+          uv pip install 'transformers==${{ matrix.transformers-version }}'
           uv run pyright hyperonnx
           uv run pre-commit run -s HEAD^ -o HEAD

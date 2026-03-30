@@ -212,18 +212,18 @@ def test_export_llama_transformers(dynamo, cache, tmp_path):
     except ImportError:
         pytest.skip("transformers not installed")
 
-    config = LlamaConfig(
-        hidden_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        use_cache=cache,
-        attn_implementation="eager",
-    )
+    config = LlamaConfig()
+    config.hidden_size = 128
+    config.num_hidden_layers = 2
+    config.num_attention_heads = 2
+    config.num_key_value_heads = 1
+    # hint: trick for transformers>=5.4, set use_cache to None to avoid newly
+    # decorator `merge_with_config_defaults` to fill with kwargs with `use_cache`
+    # value.
+    config.__dict__["use_cache"] = None
+    # pylint: disable=protected-access
+    config._attn_implementation = "eager"
     assert config.vocab_size is not None
-    assert config.num_hidden_layers is not None
-    assert config.num_key_value_heads is not None
-    assert config.hidden_size is not None
-    assert config.num_attention_heads is not None
     llama = LlamaModel(config).eval()
     example_inputs: dict = dict(
         input_ids=torch.randint(config.vocab_size, [1, 16]).long(),
@@ -232,13 +232,13 @@ def test_export_llama_transformers(dynamo, cache, tmp_path):
         cache_position=torch.arange(16).long(),
     )
     if cache:
-        example_inputs["use_cache"] = True
+        # example_inputs["use_cache"] = True
         example_inputs["past_key_values"] = StaticCache(
             size=[config.num_hidden_layers]
         ).early_initialization(
             1,
             config.num_key_value_heads,
-            config.hidden_size // config.num_attention_heads,
+            config.hidden_size,
             dtype=torch.float32,
         )
     with torch.no_grad():
@@ -269,7 +269,6 @@ def test_export_llama_transformers(dynamo, cache, tmp_path):
         patch.stopall()
         raise
 
-    onnx.save(model, "llama.onnx")
     runner = Evaluator(model, backend="onnxruntime")
     numpy_inputs = {
         k: v.numpy() for k, v in example_inputs.items() if isinstance(v, torch.Tensor)

@@ -35,9 +35,9 @@ Home = "https://github.com/LoSealL/hyperonnx"
 Docs = "https://loseall.github.io/hyperonnx"
 
 [project.optional-dependencies]
-cpu = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
-cuda = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
-xpu = ["torch", "torchvision", "pytorch-triton-xpu"]
+cpu = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
+cuda = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
+xpu = ["torch<2.11", "torchvision", "pytorch-triton-xpu"]
 
 [dependency-groups]
 dev = [
@@ -47,7 +47,7 @@ dev = [
     "pyright>=1.1.408",
     "pytest",
     "pytest-cov",
-    "transformers>=4.48.0",
+    "transformers>=4.48.0,<5.4.0",
 ]
 
 [tool.setuptools]

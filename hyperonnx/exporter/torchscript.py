@@ -16,7 +16,6 @@ limitations under the License.
 
 from contextlib import contextmanager
 from functools import update_wrapper
-from typing import Dict, List
 
 import torch
 from torch import Tensor
@@ -91,7 +90,7 @@ def make_duck_forward(module_spec: ModuleSpec):
 
 
 @contextmanager
-def replace_duck_forward(model: Module, module_spec: Dict[Module, ModuleSpec]):
+def replace_duck_forward(model: Module, module_spec: dict[Module, ModuleSpec]):
     """Replace the forward function of modules in `module_spec` with a duck type.
 
     It's used to laterly replace the duck type with the embedded onnx functions.
@@ -111,7 +110,7 @@ def replace_duck_forward(model: Module, module_spec: Dict[Module, ModuleSpec]):
         output = spec.get("output")
         return output
 
-    handles: List[RemovableHandle] = []
+    handles: list[RemovableHandle] = []
     try:
         for child in filter(lambda c: c in module_spec, model.modules()):
             if module_spec[child]["status"] == ExportStatus.EXPORTED:

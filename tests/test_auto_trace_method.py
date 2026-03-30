@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ limitations under the License.
 
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import onnx
 import pytest
@@ -79,24 +78,21 @@ class AutoTraceRnnCell(nn.Module):
 
 
 @pytest.mark.parametrize("dynamo", [True, False])
-def test_auto_trace_rnn_cell(dynamo):
+def test_auto_trace_rnn_cell(dynamo, tmp_path):
     model = AutoTraceRnnCell(10, 20)
     x = torch.randn(1, 10)
     model.eval()
 
-    with (
-        auto_trace_method(model._rnn_cell, 2) as tracer,
-        TemporaryDirectory() as tmpdir,
-    ):
+    with auto_trace_method(model._rnn_cell, 2) as tracer:
         with pytest.raises(StopIteration):
             model(x)
         tracer.export(
-            Path(tmpdir) / "rnn.onnx",
+            Path(tmp_path) / "rnn.onnx",
             input_names=["input", "hidden"],
             output_names=["hy"],
             dynamo=dynamo,
         )
-        assert len(list(Path(tmpdir).glob("*.onnx"))) == 2
-        for onnx_file in Path(tmpdir).glob("*.onnx"):
+        assert len(list(Path(tmp_path).glob("*.onnx"))) == 2
+        for onnx_file in Path(tmp_path).glob("*.onnx"):
             model = onnx.load_model(onnx_file)
             onnx.checker.check_model(model, True)

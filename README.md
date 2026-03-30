@@ -50,7 +50,7 @@ export_hyper_onnx(
 
 ```python
 from hyperonnx import auto_trace_method
-from hyperonnx.patch import patch_transformers
+from hyperonnx.transformers import patch_transformers
 from transformers import (
     GenerationConfig,
     Qwen2_5OmniThinkerForConditionalGeneration,

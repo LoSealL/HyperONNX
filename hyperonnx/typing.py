@@ -15,19 +15,20 @@ limitations under the License.
 """
 
 from collections import defaultdict
+from collections.abc import Callable
 from enum import Enum
 from inspect import Signature
 from pathlib import Path
-from typing import Callable, Dict, List, NotRequired, Tuple, TypeAlias, TypedDict
+from typing import NotRequired, TypeAlias, TypedDict
 
 from onnx import ModelProto
 from torch import Tensor
 from torch.nn import Module
 from torch.utils.hooks import RemovableHandle
 
-AnyTensor: TypeAlias = Tensor | Tuple["AnyTensor", ...] | Dict[str, "AnyTensor"]
+AnyTensor: TypeAlias = Tensor | tuple["AnyTensor", ...] | dict[str, "AnyTensor"]
 HookCallback: TypeAlias = Callable[
-    [Module, Tuple[Tensor], Dict[str, AnyTensor], AnyTensor], None
+    [Module, tuple[Tensor], dict[str, AnyTensor], AnyTensor], None
 ]
 
 
@@ -46,19 +47,19 @@ class ModuleSpec(TypedDict):
     name: str  # name of the module
     type_name: str  # onnx type name of the module
     signature: Signature  # signature of the module's forward method
-    args: Tuple[Tensor, ...]  # input args of the module
-    kwargs: NotRequired[Dict[str, AnyTensor]]  # input kwargs of the module
+    args: tuple[Tensor, ...]  # input args of the module
+    kwargs: NotRequired[dict[str, AnyTensor]]  # input kwargs of the module
     output: NotRequired[AnyTensor]  # output of the module
     handle: NotRequired[RemovableHandle]  # registered hook handle
     onnx: NotRequired[ModelProto | Path]  # exported onnx of the module
     status: ExportStatus  # keep each module only export once
     output_need_to_restore: bool  # whether the output is tuplized
-    input_names: List[str]  # input names of the module
-    output_names: List[str]  # output names of the module
-    unused_inputs: Tuple[str, ...]  # input that been optimized out
-    unused_outputs: Tuple[str, ...]  # output that been optimized out
+    input_names: list[str]  # input names of the module
+    output_names: list[str]  # output names of the module
+    unused_inputs: tuple[str, ...]  # input that been optimized out
+    unused_outputs: tuple[str, ...]  # output that been optimized out
     loops: int  # current loop count, i.e. an RNN call sequence
-    loop_outputs: List[AnyTensor]  # the output of each loop iter
+    loop_outputs: list[AnyTensor]  # the output of each loop iter
 
 
 def _module_spec_defaultdict_factory():

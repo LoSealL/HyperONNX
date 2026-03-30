@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ limitations under the License.
 # pylint: disable=arguments-differ
 
 from collections import defaultdict
+from collections.abc import Sequence
 from contextlib import suppress
 from copy import deepcopy
 from hashlib import md5
 from itertools import chain
-from typing import Dict, List, Literal, Sequence, Set, Tuple, cast
+from typing import Literal, cast
 
 import networkx as nx
 import onnx
@@ -51,7 +52,7 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
 
     def __init__(self, domain: str, module_spec: Sequence[ModuleSpec]):
         super().__init__(SingleNodePattern().with_domain(domain))
-        self._specs: Dict[str, ModuleSpec] = {
+        self._specs: dict[str, ModuleSpec] = {
             spec["type_name"]: spec for spec in module_spec
         }
 
@@ -122,8 +123,8 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
         # find the actual input with edges in the graph
         # and remove dangled inputs
         debugable_input_names = spec["input_names"]
-        dangled_input: List[str] = []
-        dangled_or_constant_unsafe: List[str] = []
+        dangled_input: list[str] = []
+        dangled_or_constant_unsafe: list[str] = []
         if len(node.input) != len(debugable_input_names):
             warning(
                 f"Number of inputs on {node.name} is different from spec. "
@@ -143,10 +144,7 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
                 debug(f"input unconnected to graph node: {input_name}")
                 dangled_or_constant_unsafe.append(input_name)
         if len(dangled_input) < unused:
-            error(
-                f"Expect {unused} unused inputs but "
-                f"enumerated {len(dangled_input)}."
-            )
+            error(f"Expect {unused} unused inputs but enumerated {len(dangled_input)}.")
             reminder = unused - len(dangled_input)
             dangled_input.extend(dangled_or_constant_unsafe[:reminder])
         for j in dangled_input:
@@ -159,8 +157,8 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
     def _remove_unused_outputs(
         self, graph: OnnxGraph, unused: int, node: NodeProto, spec: ModuleSpec
     ):
-        dangled_output: List[str] = []
-        dangled_output_unsafe: List[str] = []
+        dangled_output: list[str] = []
+        dangled_output_unsafe: list[str] = []
         for i, output_name in enumerate(node.output):
             if output_name in spec["unused_outputs"]:
                 dangled_output.append(output_name)
@@ -170,8 +168,7 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
                 dangled_output_unsafe.append(output_name)
         if len(dangled_output) < unused:
             error(
-                f"Expect {unused} unused outputs but "
-                f"enumerated {len(dangled_output)}."
+                f"Expect {unused} unused outputs but enumerated {len(dangled_output)}."
             )
             reminder = unused - len(dangled_output)
             # try to drop `reminder` outputs from the last one
@@ -182,7 +179,7 @@ class ComposeOnnxAsFunctionRewriter(Rewriter):
             if j in graph.outputs:
                 graph.remove_output(j)
 
-    def rewrite(self, graph: OnnxGraph, nodes: List[NodeProto]):
+    def rewrite(self, graph: OnnxGraph, nodes: list[NodeProto]):
         node = nodes[0]
         if node.op_type not in self._specs:
             raise KeyError(f"node spec is not found for {node.name}")
@@ -253,7 +250,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
         self.register_pre_hook(self._mark_isolated_nodes)
         self._name = name
         self._max_level = 0
-        self._level_processed: Set[int] = set()
+        self._level_processed: set[int] = set()
 
     def _mark_isolated_nodes(self, graph: OnnxGraph) -> OnnxGraph:
         # make a shallow copy of the graph
@@ -269,7 +266,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
             self._max_level = max(self._max_level, k + 1)
         return graph
 
-    def _detect_cycles_in_graph(self, graph: OnnxGraph) -> List[List[str]]:
+    def _detect_cycles_in_graph(self, graph: OnnxGraph) -> list[list[str]]:
         """Comprehensive cycle detection in the entire graph."""
         try:
             cycles = list(nx.simple_cycles(graph))
@@ -278,7 +275,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
             return []
 
     def _would_create_cycle(
-        self, graph: OnnxGraph, new_node: NodeProto, nodes_to_remove: List[NodeProto]
+        self, graph: OnnxGraph, new_node: NodeProto, nodes_to_remove: list[NodeProto]
     ) -> bool:
         """Check if adding a new node and removing old nodes would create a cycle."""
         # Create a temporary graph by copying the original and removing nodes
@@ -307,7 +304,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
             return True  # Assume cycle exists for safety
 
     def _compose_subgraph(
-        self, graph: OnnxGraph, same_level_nodes: List[NodeProto], level: int
+        self, graph: OnnxGraph, same_level_nodes: list[NodeProto], level: int
     ) -> None:
         if len(same_level_nodes) == 0:
             return  # skip empty subgraph
@@ -388,7 +385,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
             if direction == "upstream" and i.op_type == "Constant":
                 continue
 
-            same_level_nodes: List[NodeProto] = [i]
+            same_level_nodes: list[NodeProto] = [i]
             # Use BFS to collect neighbors to avoid recursive dependency issues
             visited = {i.name}
             queue = [i.name]
@@ -419,7 +416,7 @@ class ComposeNodesToFunctionsRewriter(Rewriter):
         """Compose downstream nodes into functions."""
         self._compose_neighbors(graph, node, "downstream")
 
-    def rewrite(self, graph: OnnxGraph, nodes: List[NodeProto]):
+    def rewrite(self, graph: OnnxGraph, nodes: list[NodeProto]):
         node = nodes[0]
 
         # Check for cycles before starting composition
@@ -474,10 +471,10 @@ class FuseConstantsToFunctionRewriter(Rewriter):
 
     def __init__(self):
         super().__init__(SingleNodePattern().with_domain(HYPER_DOMAIN))
-        self.users: Dict[str, int] = defaultdict(int)
+        self.users: dict[str, int] = defaultdict(int)
         self.register_pre_hook(self._collect_users)
 
-    def rewrite(self, graph: OnnxGraph, nodes: List[NodeProto]):
+    def rewrite(self, graph: OnnxGraph, nodes: list[NodeProto]):
         node = nodes[0]
         func = graph.functions.get(node.op_type)
         if func is None:
@@ -491,7 +488,7 @@ class FuseConstantsToFunctionRewriter(Rewriter):
             node.op_type = func.name
             self.users[func.name] += 1
 
-        consts: List[Tuple[int, NodeProto]] = []
+        consts: list[tuple[int, NodeProto]] = []
         for i, cst in enumerate(self.get_input_nodes(node)):
             if cst is not None and cst.op_type == "Constant":
                 consts.append((i, cst))
@@ -520,7 +517,7 @@ class EraseOutputTypesRewriter(Rewriter):
         super().__init__(pattern=SingleNodePattern().with_name("__NO_MATCH__"))
         self.register_pre_hook(self._clear_types)
         self.register_post_hook(self._infer_types)
-        self.output_types: List[onnx.TypeProto] = []
+        self.output_types: list[onnx.TypeProto] = []
 
     def _clear_types(self, graph: OnnxGraph):
         for i in graph.output:

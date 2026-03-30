@@ -123,7 +123,9 @@ class TestBuildOnnxScript(unittest.TestCase):
         )
 
         @onnxscript.script(test_op)
-        def onnx_dual_d2d(x: onnxscript.FLOAT, y: onnxscript.FLOAT) -> tuple[
+        def onnx_dual_d2d(
+            x: onnxscript.FLOAT, y: onnxscript.FLOAT
+        ) -> tuple[
             onnxscript.FLOAT,
             onnxscript.FLOAT,
         ]:

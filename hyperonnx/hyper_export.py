@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from collections.abc import Collection, Container
 from contextlib import suppress
 from inspect import signature
 from io import BytesIO
@@ -21,7 +22,7 @@ from logging import Logger
 from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Collection, Container, Dict, List, Optional, Tuple
+from typing import Any
 
 import onnx
 from onnxifier import ONNXIFIER_OPSET, OnnxGraph, PassManager
@@ -48,8 +49,8 @@ from .typing import (
 from .utils import HYPER_DOMAIN, OPTIMIZER_PASSES
 
 
-def _get_input_names(spec: ModuleSpec) -> List[str]:
-    names: List[str] = []
+def _get_input_names(spec: ModuleSpec) -> list[str]:
+    names: list[str] = []
     params = spec["signature"].parameters
 
     def _arg_to_name(name: str, args):
@@ -70,13 +71,13 @@ def _get_input_names(spec: ModuleSpec) -> List[str]:
     return names
 
 
-def _get_output_names(spec: ModuleSpec) -> None | List[str]:
+def _get_output_names(spec: ModuleSpec) -> None | list[str]:
     output = spec.get("output")
     if output is None:
         return None
 
-    def _extract_names_from_dict(out_dict: dict) -> List[str]:
-        names: List[str] = []
+    def _extract_names_from_dict(out_dict: dict) -> list[str]:
+        names: list[str] = []
         for key, value in out_dict.items():
             if isinstance(value, dict):
                 names.extend(_extract_names_from_dict(value))
@@ -99,7 +100,7 @@ def _get_output_names(spec: ModuleSpec) -> None | List[str]:
 
 
 def make_hierarchical_hook(
-    hiera: Container[type[Module]], module_spec: Dict[Module, ModuleSpec], index: int
+    hiera: Container[type[Module]], module_spec: dict[Module, ModuleSpec], index: int
 ) -> HookCallback:
     """Make a forward hook to record spec of modules in `hiera`.
 
@@ -115,8 +116,8 @@ def make_hierarchical_hook(
 
     def _hook(
         module: Module,
-        args: Tuple[Tensor],
-        kwargs: Dict[str, AnyTensor],
+        args: tuple[Tensor],
+        kwargs: dict[str, AnyTensor],
         output: AnyTensor,
     ) -> None:
         spec = module_spec[module]
@@ -140,12 +141,12 @@ def make_hierarchical_hook(
 def trace_module_spec(
     model: Module,
     input_args: tuple,
-    kwargs: Optional[Dict[str, AnyTensor]],
+    kwargs: dict[str, AnyTensor] | None,
     opset_version: int,
     hiera: Container[type[Module]],
-    module_spec: Dict[Module, ModuleSpec],
+    module_spec: dict[Module, ModuleSpec],
     dynamo: bool = False,
-) -> Dict[Module, ModuleSpec]:
+) -> dict[Module, ModuleSpec]:
     """Register forward hooks to modules in the `hiera` and record forward
     information to `module_spec`.
 
@@ -208,13 +209,13 @@ def _export_hiera(
     dynamo: bool,
     external_data: bool,
     do_optimization: bool,
-    external_directory: Optional[str | PathLike],
-    module_spec: Dict[Module, ModuleSpec],
+    external_directory: str | PathLike | None,
+    module_spec: dict[Module, ModuleSpec],
     hiera: Collection[type[Module]],
     logger: Logger,
 ):
-    def _get_sub_spec(module: Module, spec: Dict[Module, ModuleSpec]):
-        child_spec: Dict[Module, ModuleSpec] = default_module_spec()
+    def _get_sub_spec(module: Module, spec: dict[Module, ModuleSpec]):
+        child_spec: dict[Module, ModuleSpec] = default_module_spec()
         for child in module.modules():
             if child in spec:
                 child_spec[child] = spec[child]
@@ -308,16 +309,16 @@ def export_hyper_onnx(  # noqa: C901
     input_args: tuple,
     f: str | PathLike | BytesIO,
     *,
-    kwargs: Optional[Dict[str, AnyTensor]] = None,
-    input_names: Optional[List[str]] = None,
-    output_names: Optional[List[str]] = None,
+    kwargs: dict[str, AnyTensor] | None = None,
+    input_names: list[str] | None = None,
+    output_names: list[str] | None = None,
     opset_version: int = ONNXIFIER_OPSET.version,
     dynamo: bool = False,
     external_data: bool = False,
-    hiera: Optional[Collection[type[Module]]] = None,
-    module_spec: Optional[Dict[Module, ModuleSpec]] = None,
+    hiera: Collection[type[Module]] | None = None,
+    module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
-    external_directory: Optional[str | PathLike] = None,
+    external_directory: str | PathLike | None = None,
     **_: Any,  # ignored options
 ) -> Any | None:
     r"""Export a Pytorch module to ONNX format with hierarchical structure,
@@ -450,12 +451,12 @@ def export_hyper_onnx(  # noqa: C901
         else:
             onnx_model = onnx.load_model_from_string(model_path.getvalue())
 
-    typenames: List[str] = [module_spec[i]["type_name"] for i in module_spec]
+    typenames: list[str] = [module_spec[i]["type_name"] for i in module_spec]
     for node in onnx_model.graph.node:
         if node.op_type in typenames:
             node.domain = HYPER_DOMAIN  # add domain tag to run rewriter
     graph = OnnxGraph(onnx_model)
-    passes: List[Any]
+    passes: list[Any]
     passes = [ComposeOnnxAsFunctionRewriter(HYPER_DOMAIN, tuple(module_spec.values()))]
     if do_optimization:
         passes.extend(OPTIMIZER_PASSES)

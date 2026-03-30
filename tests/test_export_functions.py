@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ limitations under the License.
 
 # pylint: disable=missing-class-docstring,missing-function-docstring
 
-import tempfile
 from io import BytesIO
 from pathlib import Path
 
@@ -47,12 +46,7 @@ class ModuleLvl1(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.head = torch.nn.Conv2d(1, 1, 1)
-        self.body = torch.nn.ModuleList(
-            [
-                ModuleLvl2(),
-                ModuleLvl2(),
-            ]
-        )
+        self.body = torch.nn.ModuleList([ModuleLvl2(), ModuleLvl2()])
 
     def forward(self, x):
         y = self.head(x)
@@ -123,7 +117,7 @@ def build_hyber_onnx():
     return model
 
 
-def test_export_module_with_2_levels():
+def test_export_module_with_2_levels(tmp_path):
     model = ModuleTop()
     with BytesIO() as f:
         export_hyper_onnx(
@@ -136,51 +130,49 @@ def test_export_module_with_2_levels():
     assert "ModuleLvl2" in types
 
     graph = OnnxGraph(onnx_model)
-    with tempfile.TemporaryDirectory() as d:
-        passes = PassManager(
-            ["export_functions"],
-            configs={
-                "export_functions": {"path": d},
-            },
+    passes = PassManager(
+        ["export_functions"],
+        configs={
+            "export_functions": {"path": tmp_path},
+        },
+    )
+    passes.optimize(graph, True)
+    subgraphs = sorted(Path(tmp_path).rglob("*.onnx"))
+    # 00.conv, 01.00, 01.01, 01.02, totally 4 parts
+    assert len(subgraphs) == 4
+    # ensure the subgraph is topologically sorted
+    graph_verify = make_graph(
+        [],
+        "ver",
+        graph.input,
+        graph.output,
+    )
+    for g in subgraphs:
+        subgraph = onnx.load_model(g, load_external_data=False)
+        node = make_node(
+            g.stem,
+            [j.name for j in subgraph.graph.input],
+            [j.name for j in subgraph.graph.output],
+            name=g.stem,
+            domain="TEST",
         )
-        passes.optimize(graph, True)
-        subgraphs = sorted(Path(d).rglob("*.onnx"))
-        # 00.conv, 01.00, 01.01, 01.02, totally 4 parts
-        assert len(subgraphs) == 4
-        # ensure the subgraph is topologically sorted
-        graph_verify = make_graph(
-            [],
-            "ver",
-            graph.input,
-            graph.output,
-        )
-        for g in subgraphs:
-            subgraph = onnx.load_model(g, load_external_data=False)
-            node = make_node(
-                g.stem,
-                [j.name for j in subgraph.graph.input],
-                [j.name for j in subgraph.graph.output],
-                name=g.stem,
-                domain="TEST",
-            )
-            graph_verify.node.append(node)
-        model_verify = make_model(
-            graph_verify, opset_imports=[make_operatorsetid("TEST", 1), ONNXIFIER_OPSET]
-        )
-        onnx.checker.check_model(model_verify, True)
+        graph_verify.node.append(node)
+    model_verify = make_model(
+        graph_verify, opset_imports=[make_operatorsetid("TEST", 1), ONNXIFIER_OPSET]
+    )
+    onnx.checker.check_model(model_verify, True)
 
 
-def test_export_hyber_model_with_same_io():
+def test_export_hyber_model_with_same_io(tmp_path):
     onnx_model = build_hyber_onnx()
     graph = OnnxGraph(onnx_model)
-    with tempfile.TemporaryDirectory() as d:
-        passes = PassManager(
-            ["export_functions"],
-            configs={
-                "export_functions": {"path": d},
-            },
-        )
-        passes.optimize(graph, True)
-        subgraphs = sorted(Path(d).rglob("*.onnx"))
-        # 00.conv, 01.00, 01.01, 01.02, totally 4 parts
-        assert len(subgraphs) == 1
+    passes = PassManager(
+        ["export_functions"],
+        configs={
+            "export_functions": {"path": tmp_path},
+        },
+    )
+    passes.optimize(graph, True)
+    subgraphs = sorted(Path(tmp_path).rglob("*.onnx"))
+    # 00.conv, 01.00, 01.01, 01.02, totally 4 parts
+    assert len(subgraphs) == 1

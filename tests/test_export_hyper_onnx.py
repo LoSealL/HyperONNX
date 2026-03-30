@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ limitations under the License.
 
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import onnx
@@ -33,7 +32,7 @@ from torchvision.models.resnet import BasicBlock, Bottleneck, ResNet
 from torchvision.models.vision_transformer import Encoder, EncoderBlock, vit_b_16
 
 from hyperonnx import export_hyper_onnx
-from hyperonnx.patch import patch_transformers
+from hyperonnx.transformers import StaticCache, patch_transformers
 
 
 class ModuleLvl2(torch.nn.Module):
@@ -48,22 +47,14 @@ class ModuleLvl1(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.head = torch.nn.Conv2d(1, 1, 1)
-        self.body = torch.nn.ModuleList(
-            [
-                ModuleLvl2(),
-                ModuleLvl2(),
-            ]
-        )
+        self.body = torch.nn.ModuleList([ModuleLvl2(), ModuleLvl2()])
 
     def forward(self, x):
         y = self.head(x)
         z1, z2 = x, y
         for i, net in enumerate(self.body):
             z1, z2 = net(z1, z2, attr1=i, attr2=i + 1)
-        return {
-            "z1": z1,
-            "z2": z2,
-        }
+        return {"z1": z1, "z2": z2}
 
 
 class ModuleTop(torch.nn.Module):
@@ -171,22 +162,22 @@ def test_export_resnet_with_basicblock_and_bottleneck(dynamo):
 
 
 @pytest.mark.parametrize("dynamo", [True, False])
-def test_export_vit_with_encoder_and_encoderblock(dynamo):
+def test_export_vit_with_encoder_and_encoderblock(dynamo, tmp_path):
     vit = vit_b_16().eval()
-    with BytesIO() as f, TemporaryDirectory() as tmpdir:
-        with chdir(tmpdir):
+    with BytesIO() as f:
+        with chdir(tmp_path):
             export_hyper_onnx(
                 vit,
                 (torch.randn(1, 3, 224, 224),),
                 f,
                 hiera=[Encoder, EncoderBlock],
-                external_directory=tmpdir,
+                external_directory=tmp_path,
                 external_data=True,
                 dynamo=dynamo,
             )
             model = onnx.load_from_string(f.getvalue())
-        load_external_data_for_model(model, str(tmpdir))
-        external_files = sorted(Path(tmpdir).glob("*.onnx"))
+        load_external_data_for_model(model, str(tmp_path))
+        external_files = sorted(Path(tmp_path).glob("*.onnx"))
         assert len(external_files) == 15
     try:
         onnx.checker.check_model(model, True)
@@ -206,7 +197,8 @@ def test_export_vit_with_encoder_and_encoderblock(dynamo):
 
 
 @pytest.mark.parametrize("dynamo", [True, False])
-def test_export_llama_transformers(dynamo):
+@pytest.mark.parametrize("cache", [True, False])
+def test_export_llama_transformers(dynamo, cache, tmp_path):
     if dynamo:
         pytest.skip("dynamo export not work for llama model yet")
     try:
@@ -224,25 +216,48 @@ def test_export_llama_transformers(dynamo):
         hidden_size=128,
         num_hidden_layers=2,
         num_attention_heads=2,
-        use_cache=None,  # type: ignore
+        use_cache=cache,
+        attn_implementation="eager",
     )
-    config._attn_implementation = "eager"
+    assert config.vocab_size is not None
+    assert config.num_hidden_layers is not None
+    assert config.num_key_value_heads is not None
+    assert config.hidden_size is not None
+    assert config.num_attention_heads is not None
     llama = LlamaModel(config).eval()
-    example_inputs = dict(
+    example_inputs: dict = dict(
         input_ids=torch.randint(config.vocab_size, [1, 16]).long(),
         attention_mask=torch.ones([1, 16]),
         position_ids=torch.arange(16).long()[None],
+        cache_position=torch.arange(16).long(),
     )
-    ref_output = llama(**example_inputs)
-    with BytesIO() as f, TemporaryDirectory() as tmpdir, patch_transformers():
+    if cache:
+        example_inputs["use_cache"] = True
+        example_inputs["past_key_values"] = StaticCache(
+            size=[config.num_hidden_layers]
+        ).early_initialization(
+            1,
+            config.num_key_value_heads,
+            config.hidden_size // config.num_attention_heads,
+            dtype=torch.float32,
+        )
+    with torch.no_grad():
+        ref_output = llama(**example_inputs)
+    with BytesIO() as f, patch_transformers(), torch.no_grad():
+        input_names = ["input_ids", "attention_mask", "position_ids", "cache_position"]
+        if cache:
+            input_names.insert(-1, "past_key_values")
+        output_names = ["last_hidden_state"]
+        if cache:
+            output_names.append("present_key_values")
         export_hyper_onnx(
             llama,
             (example_inputs,),
             f,
-            input_names=["input_ids", "attention_mask", "position_ids"],
-            output_names=["last_hidden_state"],
+            input_names=input_names,
+            output_names=output_names,
             hiera=[LlamaAttention, LlamaDecoderLayer],
-            external_directory=tmpdir,
+            external_directory=tmp_path,
             dynamo=dynamo,
         )
         model = onnx.load_from_string(f.getvalue())
@@ -254,14 +269,14 @@ def test_export_llama_transformers(dynamo):
         patch.stopall()
         raise
 
+    onnx.save(model, "llama.onnx")
     runner = Evaluator(model, backend="onnxruntime")
     numpy_inputs = {
         k: v.numpy() for k, v in example_inputs.items() if isinstance(v, torch.Tensor)
     }
-    actual_output = runner(
-        [],
-        numpy_inputs,
-    )[0]
+    if cache:
+        numpy_inputs["past_key_values"].fill(0)
+    actual_output = runner([], numpy_inputs)[0]
     torch.testing.assert_close(torch.from_numpy(actual_output), ref_output[0])
 
 

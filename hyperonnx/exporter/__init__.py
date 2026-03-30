@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 from contextlib import contextmanager
-from typing import Dict
 
 from torch.nn import Module
 
@@ -26,7 +25,7 @@ from .torchscript import replace_duck_forward
 
 @contextmanager
 def replace_with_duck_module(
-    model: Module, dynamo: bool, module_spec: Dict[Module, ModuleSpec]
+    model: Module, dynamo: bool, module_spec: dict[Module, ModuleSpec]
 ):
     """Replace the forward function of modules in `module_spec` with a duck type.
 

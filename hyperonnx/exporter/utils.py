@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from collections.abc import Sequence
 from itertools import chain
-from typing import Sequence, Tuple
 
 import torch
 from onnxifier.logger import warning
@@ -24,7 +24,7 @@ from torch import Tensor
 from ..typing import AnyTensor, ModuleSpec
 
 
-def plain_tensor_container(obj: AnyTensor) -> Tuple[Tensor, ...]:
+def plain_tensor_container(obj: AnyTensor) -> tuple[Tensor, ...]:
     """Iteratively flatten an arbitrary output of Tensors into a tuple of Tensors.
 
     Args:

@@ -17,8 +17,8 @@ limitations under the License.
 import inspect
 from ast import AST
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable, Dict
 
 import onnxscript
 import onnxscript.ir._schemas as schemas
@@ -257,7 +257,7 @@ def make_custom_op(module: Module, spec: ModuleSpec):
 
 
 @contextmanager
-def replace_with_custom_op(model: Module, module_spec: Dict[Module, ModuleSpec]):
+def replace_with_custom_op(model: Module, module_spec: dict[Module, ModuleSpec]):
     """Replace the forward function of modules in `module_spec` with a duck type.
 
     It's used to laterly replace the duck type with the embedded onnx functions.

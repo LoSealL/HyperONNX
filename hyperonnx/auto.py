@@ -15,13 +15,13 @@ limitations under the License.
 """
 
 import inspect
+from collections.abc import Collection
 from contextlib import contextmanager
 from functools import wraps
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
 from types import MethodType
-from typing import Collection, Dict, List, Optional, Tuple
 
 from torch import inference_mode
 from torch.nn import Module
@@ -60,8 +60,8 @@ class AutoTraceMethod(Module):
 
     def __init__(self, clsmethod: MethodType, expected_stages: int = 1):
         super().__init__()
-        self.pos_args: List[Tuple[AnyTensor, ...]] = []
-        self.kwargs: List[Dict[str, AnyTensor]] = []
+        self.pos_args: list[tuple[AnyTensor, ...]] = []
+        self.kwargs: list[dict[str, AnyTensor]] = []
         model = clsmethod.__self__
         if not isinstance(model, Module):
             for k, v in model.__dict__.items():
@@ -88,15 +88,15 @@ class AutoTraceMethod(Module):
         self,
         f: str | PathLike | BytesIO,
         *,
-        input_names: Optional[List[str]] = None,
-        output_names: Optional[List[str]] = None,
+        input_names: list[str] | None = None,
+        output_names: list[str] | None = None,
         opset_version: int = 19,
         dynamo: bool = False,
         external_data: bool = False,
-        hiera: Optional[Collection[type[Module]]] = None,
-        module_spec: Optional[Dict[Module, ModuleSpec]] = None,
+        hiera: Collection[type[Module]] | None = None,
+        module_spec: dict[Module, ModuleSpec] | None = None,
         do_optimization: bool = True,
-        external_directory: Optional[str | PathLike] = None,
+        external_directory: str | PathLike | None = None,
     ):
         """Export onnx model according to the traced data."""
         if not self.pos_args and not self.kwargs:

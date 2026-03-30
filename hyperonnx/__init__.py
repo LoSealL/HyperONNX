@@ -19,4 +19,4 @@ from .hyper_export import export_hyper_onnx
 from .utils import HYPER_DOMAIN
 
 __all__ = ["auto_trace_method", "export_hyper_onnx", "HYPER_DOMAIN"]
-__version__ = "1.0.1"
+__version__ = "1.0.2"

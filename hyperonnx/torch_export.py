@@ -15,10 +15,10 @@ limitations under the License.
 """
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from inspect import signature
 from os import PathLike
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
 from torch.onnx import OperatorExportTypes

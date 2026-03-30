@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -366,9 +366,9 @@ def test_compose_nodes_to_functions_cycle_prevention():
 
         # Verify no cycles exist in the final graph
         cycles = list(nx.simple_cycles(graph))
-        assert (
-            len(cycles) == 0
-        ), f"Cycles detected in final graph with order={order}: {cycles}"
+        assert len(cycles) == 0, (
+            f"Cycles detected in final graph with order={order}: {cycles}"
+        )
 
         # Should have composed some functions
         assert len(graph.functions) >= 2  # At least exp_func and complex_func

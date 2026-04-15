@@ -140,6 +140,7 @@ def test_export_resnet_with_basicblock_and_bottleneck(dynamo):
             input_names=["input.1"],
             hiera=[ResNet, BasicBlock, Bottleneck],
             do_optimization=False,
+            fold_nodes_to_functions=False,
             dynamo=dynamo,
         )
         model = onnx.load_from_string(f.getvalue())
@@ -311,6 +312,8 @@ def test_export_rnnlike(dynamo):
             hiera=[RNNCell],
             input_names=["x"],
             do_optimization=False,
+            fold_nodes_to_functions=False,
+            fuse_constants_to_function=False,
             dynamo=dynamo,
         )
         onnx_model = onnx.load_from_string(f.getvalue())

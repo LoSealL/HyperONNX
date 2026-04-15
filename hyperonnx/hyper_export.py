@@ -209,6 +209,8 @@ def _export_hiera(
     dynamo: bool,
     external_data: bool,
     do_optimization: bool,
+    fold_nodes_to_functions: bool,
+    fuse_constants_to_function: bool,
     external_directory: str | PathLike | None,
     module_spec: dict[Module, ModuleSpec],
     hiera: Collection[type[Module]],
@@ -244,6 +246,8 @@ def _export_hiera(
                 hiera=hiera,
                 module_spec=child_spec,
                 do_optimization=do_optimization,
+                fold_nodes_to_functions=fold_nodes_to_functions,
+                fuse_constants_to_function=fuse_constants_to_function,
                 external_directory=external_directory,
             )
             # update since child_spec may be updated
@@ -318,6 +322,8 @@ def export_hyper_onnx(  # noqa: C901
     hiera: Collection[type[Module]] | None = None,
     module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
+    fold_nodes_to_functions: bool = True,
+    fuse_constants_to_function: bool = True,
     external_directory: str | PathLike | None = None,
     **_: Any,  # ignored options
 ) -> Any | None:
@@ -347,6 +353,10 @@ def export_hyper_onnx(  # noqa: C901
         module_spec (Optional[Dict[Module, ModuleSpec]]): A dictionary to store the
             detail spec of modules.
         do_optimization: Whether to optimize the exported ONNX model.
+        fold_nodes_to_functions: Whether to compose individual nodes into a function.
+            Defaults to True.
+        fuse_constants_to_function: Whether to fuse constants into function.
+            Defaults to True.
         external_directory (Optional[str | PathLike]): The directory to save the onnx
             model exported to be composed. If not specified, the model will be saved
             in the memory. Set to True if functions to be composed are too large.
@@ -389,7 +399,8 @@ def export_hyper_onnx(  # noqa: C901
                 if _dyn == dynamo:
                     logger.warning(
                         f"  Failed to export {model_typename}, "
-                        f"try use dynamo={not _dyn}"
+                        f"try use dynamo={not _dyn}, "
+                        "set ONNXIFIER_LOG_LEVEL=DEBUG to see error logs."
                     )
                 logger.debug(f"  <<<\n{ex}")
         raise RuntimeError(f"  Failed to export {model_typename}.")
@@ -411,6 +422,8 @@ def export_hyper_onnx(  # noqa: C901
         dynamo=dynamo,
         external_data=external_data,
         do_optimization=do_optimization,
+        fold_nodes_to_functions=fold_nodes_to_functions,
+        fuse_constants_to_function=fuse_constants_to_function,
         external_directory=external_directory,
         module_spec=module_spec,
         hiera=hiera,
@@ -460,7 +473,9 @@ def export_hyper_onnx(  # noqa: C901
     passes = [ComposeOnnxAsFunctionRewriter(HYPER_DOMAIN, tuple(module_spec.values()))]
     if do_optimization:
         passes.extend(OPTIMIZER_PASSES)
+    if fold_nodes_to_functions:
         passes.append(ComposeNodesToFunctionsRewriter(model_typename))
+    if fuse_constants_to_function:
         passes.append(FuseConstantsToFunctionRewriter())
     with chdir(external_directory):
         graph = PassManager(

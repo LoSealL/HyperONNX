@@ -28,7 +28,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dynamic = ["version", "description"]
-dependencies = ["onnxifier>=2.0.1", "onnxscript<0.6.0", "onnx>=1.18.0"]
+dependencies = ["onnxifier>=2.0.3", "onnxscript<0.6.0", "onnx>=1.18.0"]
 
 [project.urls]
 Home = "https://github.com/LoSealL/hyperonnx"
@@ -47,7 +47,7 @@ dev = [
     "pyright>=1.1.408",
     "pytest",
     "pytest-cov",
-    "transformers>=4.48.0,<5.4.0",
+    "transformers>=4.48.0",
 ]
 
 [tool.setuptools]
@@ -56,7 +56,7 @@ packages = ["hyperonnx"]
 
 [tool.pyright]
 include = ["hyperonnx"]
-exclude = ["tests"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", ".venv", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

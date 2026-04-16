@@ -33,6 +33,8 @@ class StaticCache(Tensor):
         We should treat DynamicCache as static for onnx export.
     """
 
+    # pylint: disable=unused-argument
+
     def update(
         self,
         key_states: Tensor,
@@ -61,6 +63,12 @@ class StaticCache(Tensor):
 
         layer_kv = self[layer_idx]
         keys, values = layer_kv.unbind()
+        if torch.onnx.is_in_onnx_export():
+            # We don't want to update cache because it's inplace. During exporting,
+            # the forward could be called multiple times and the cache will be falsely
+            # updated, so we skip cache update in onnx exporting phase.
+            keys = keys.clone()
+            values = values.clone()
         # Some old models give None for `cache_position` or even omit passing
         # `cache_kwargs` when used as cross-attention, in which case we should copy
         # the whole Layer (key_states.shape[-2] == self.max_cache_len)
@@ -81,6 +89,40 @@ class StaticCache(Tensor):
             values[:, :, cache_position] = value_states
 
         return keys, values
+
+    def update_conv_state(
+        self, conv_states: torch.Tensor, layer_idx: int, **kwargs
+    ) -> torch.Tensor:
+        """
+        Updates the cache with the new `conv_states` for the layer `layer_idx`.
+
+        Parameters:
+            conv_states (`torch.Tensor`):
+                The new conv states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+
+        Return:
+            `torch.Tensor`: The updated conv states.
+        """
+        raise NotImplementedError("Qwen GDN conv state is not supported yet.")
+
+    def update_recurrent_state(
+        self, recurrent_states: torch.Tensor, layer_idx: int, **kwargs
+    ) -> torch.Tensor:
+        """
+        Updates the cache with the new `recurrent_states` for the layer `layer_idx`.
+
+        Parameters:
+            smm_states (`torch.Tensor`):
+                The new ssm states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+
+        Return:
+            `torch.Tensor`: The updated ssm states.
+        """
+        raise NotImplementedError("Qwen GDN recurrent state is not supported yet.")
 
     def early_initialization(
         self,
@@ -107,11 +149,9 @@ class StaticCache(Tensor):
         """Returns the sequence length of the cache for the given layer."""
         if layer_idx >= self.shape[0]:
             return 0
-        return int(self[0, 0].any(dim=-1).sum().item())
+        return int(self[layer_idx, 0].any(dim=-1).sum().item())
 
-    def get_mask_sizes(
-        self, cache_position: torch.Tensor, layer_idx: int
-    ) -> tuple[int, int]:
+    def get_mask_sizes(self, query_length: int, layer_idx: int) -> tuple[int, int]:
         """
         Return a tuple (kv_length, kv_offset) corresponding to the length and offset
         that will be returned for the given layer at `layer_idx`. The masks are then
@@ -119,8 +159,9 @@ class StaticCache(Tensor):
         for each layer.
         """
         if layer_idx >= self.shape[0]:
-            return cache_position.shape[0], 0
-        return self.shape[4], 0
+            if isinstance(query_length, torch.Tensor) and query_length.ndim > 0:
+                return query_length.shape[0], 0
+        return self.max_cache_len, 0
 
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         """
@@ -139,6 +180,18 @@ class StaticCache(Tensor):
         """Reorder the cache for beam search"""
         if self.get_seq_length() > 0:
             self.copy_(self.index_select(0, beam_idx.to(self.device)))
+
+    def crop(self, max_length: int):
+        """Do nothing for static cache."""
+        return
+
+    def batch_repeat_interleave(self, repeats: int):
+        """Do nothing for static cache."""
+        return
+
+    def batch_select_indices(self, indices: torch.Tensor):
+        """Do nothing for static cache."""
+        return
 
     @property
     def max_batch_size(self) -> int:

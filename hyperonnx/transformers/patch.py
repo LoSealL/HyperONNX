@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import importlib
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import torch
 from packaging.version import Version
 
 
@@ -34,6 +35,7 @@ def patch_transformers():
     TRANSFORMERS_HAS_SDPA_ATTENTION = Version("4.48.0")
     TRANSFORMERS_HAS_SDPA_MASK = Version("4.53.0")
     TRANSFORMERS_FIX_VMAP = Version("5.0.0")
+    TRANSFORMERS_DEPRECATE_CACHE_POSITION = Version("5.4.0")
     CURR_VER = Version(transformers.__version__)
 
     patches = []
@@ -56,6 +58,33 @@ def patch_transformers():
             "transformers.integrations.sdpa_attention.use_gqa_in_sdpa", use_gqa_in_sdpa
         )
         patches.append(p2)
+    if CURR_VER >= TRANSFORMERS_DEPRECATE_CACHE_POSITION:
+        original_sdpa_mask = transformers.masking_utils.sdpa_mask
+
+        def patch_sdpa_mask(
+            batch_size: int,
+            q_length: int,
+            kv_length: int,
+            *args,
+            **kwargs,
+        ):
+            # In onnx exporting (torch.onnx.is_in_onnx_export()==True), the shape of a
+            # Tensor is still a tensor:
+            # type(tensor([1]).shape[0]) == torch.Tensor
+            # So the wrap in sdpa_mask is wrong in this case. We forcely convert the
+            # shape to integer.
+            def _to_int(x):
+                if isinstance(x, torch.Tensor) and x.ndim == 0:
+                    return int(x.item())
+                return x
+
+            q_length = _to_int(q_length)
+            kv_length = _to_int(kv_length)
+
+            return original_sdpa_mask(batch_size, q_length, kv_length, *args, **kwargs)
+
+        p3 = patch("transformers.masking_utils.sdpa_mask", patch_sdpa_mask)
+        patches.append(p3)
 
     try:
         for p in patches:

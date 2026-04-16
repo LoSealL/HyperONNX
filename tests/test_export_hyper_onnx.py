@@ -230,7 +230,6 @@ def test_export_llama_transformers(dynamo, cache, tmp_path):
         input_ids=torch.randint(config.vocab_size, [1, 16]).long(),
         attention_mask=torch.ones([1, 16]),
         position_ids=torch.arange(16).long()[None],
-        cache_position=torch.arange(16).long(),
     )
     if cache:
         # example_inputs["use_cache"] = True
@@ -244,10 +243,12 @@ def test_export_llama_transformers(dynamo, cache, tmp_path):
         )
     with torch.no_grad():
         ref_output = llama(**example_inputs)
-    with BytesIO() as f, patch_transformers(), torch.no_grad():
-        input_names = ["input_ids", "attention_mask", "position_ids", "cache_position"]
         if cache:
-            input_names.insert(-1, "past_key_values")
+            example_inputs["past_key_values"].fill_(0)
+    with BytesIO() as f, patch_transformers(), torch.no_grad():
+        input_names = ["input_ids", "attention_mask", "position_ids"]
+        if cache:
+            input_names.append("past_key_values")
         output_names = ["last_hidden_state"]
         if cache:
             output_names.append("present_key_values")

@@ -1,5 +1,6 @@
 .*/
-!.github/
+!/.claude/
+!/.github/
 *.egg-info
 __pycache__
 # pdm build tool
@@ -14,3 +15,8 @@ tests/models/
 
 uv.lock
 .coverage
+
+# agents
+/.claude/settings.json
+/.github/agents/
+/.github/skills/

@@ -24,6 +24,8 @@ import torch
 from torch.onnx import OperatorExportTypes
 from torch.onnx import export as torch_export
 
+from .utils import capture_torch_jit_warnings
+
 if torch_export.__module__ != "torch.onnx":
     warnings.warn(
         "torch.onnx.export has been replaced by "
@@ -31,6 +33,7 @@ if torch_export.__module__ != "torch.onnx":
     )
 
 
+@capture_torch_jit_warnings
 def torch_export_handle_lower_version(
     model: torch.nn.Module,
     args: tuple[Any, ...] = (),

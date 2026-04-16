@@ -105,6 +105,7 @@ torchvision = [
     { index = "pytorch-xpu", extra = "xpu" },
 ]
 pytorch-triton-xpu = { index = "pytorch-xpu" }
+onnxifier = { path = "../ONNXifier", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

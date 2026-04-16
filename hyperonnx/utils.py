@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,6 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import warnings
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
+
+from onnxifier.logger import debug
+
 HYPER_DOMAIN = "hyper"
 
 OPTIMIZER_PASSES = (
@@ -25,3 +32,27 @@ OPTIMIZER_PASSES = (
     "erase_output_types",
     "onnx_simplifier",
 )
+
+
+def capture_torch_jit_warnings(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """A decorator for a function to capture warnings,
+    emitted during legacy torch onnx export.
+
+    Args:
+        fn (Callable[..., Any]): The function to be decorated.
+
+    Returns:
+        Callable[..., Any]: The decorated function.
+    """
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            res = fn(*args, **kwargs)
+            debug("Captured %s warnings during torch export.", len(w))
+            for msg in w:
+                debug("- %s", msg)
+            return res
+
+    return wrapper

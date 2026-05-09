@@ -13,9 +13,16 @@ jobs:
         python-version: ["3.12"]
         transformers-version: ["4.53.0", "5.1.0"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 2
+      - uses: actions/checkout@v6
+        with:
+          repository: loseall/ONNXifier
+          fetch-depth: 1
+          path: deps/ONNXifier
+      - name: Update onnxifier source path in pyproject.toml
+        run: sed -i 's|path = "../ONNXifier"|path = "deps/ONNXifier"|g' pyproject.toml
       - name: Install uv and set the Python version
         uses: astral-sh/setup-uv@v6
         with:

@@ -19,7 +19,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "hyperonnx"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Wenyi Tang", email = "wenyitang@outlook.com" }]
 license-files = ["LICENSE"]
 classifiers = [
@@ -80,7 +80,6 @@ ignore-paths = []
 [tool.pylint."MESSAGES CONTROL"]
 disable = [
     "logging-fstring-interpolation",
-    "import-outside-toplevel",
     "missing-module-docstring",
     "no-member",
     "no-name-in-module",

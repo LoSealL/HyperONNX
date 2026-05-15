@@ -101,9 +101,35 @@ def attention_interface(
     :class:`transformers.modeling_utils.AttentionInterface`.
     """
     del module, dropout, kwargs
+    # shape check
+    need_transpose = False
+    if query.ndim == 3:
+        batch, seq, hidden_size = query.shape
+        if key.ndim != 3 or value.ndim != 3:
+            raise ValueError(
+                "query dim is [b, s, d], got ndim of key "
+                f"{key.ndim} and value {value.ndim}"
+            )
+        assert key.shape[0] == value.shape[0] == batch
+        assert key.shape[1] == value.shape[1]
+    elif query.ndim >= 4:
+        batch, *_, qhead, seq, qdim = query.shape
+        if key.ndim != query.ndim or value.ndim != query.ndim:
+            raise ValueError(
+                "query dim is [b, *, h, s, d], got ndim of "
+                f"key {key.ndim} and value {value.ndim}"
+            )
+        assert key.shape[0] == value.shape[0] == batch
+        assert query.shape[-1] == key.shape[-1]
+        assert key.shape[-3:-1] == value.shape[-3:-1]
+        # In transformers attention output is transposed to [B, S, H, D]
+        need_transpose = True
+
     attn_output = _attention_impl(
         query, key, value, attn_mask=attention_mask, scale=scaling
     )
+    if need_transpose:
+        attn_output.transpose_(-2, -3)
     attn_weights = None
     return attn_output, attn_weights
 

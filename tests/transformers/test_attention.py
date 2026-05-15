@@ -45,6 +45,7 @@ def test_attention_opset24_forward():
         torch.nn.Module(), query, key, value, attn_mask, scale
     )
     expected = scaled_dot_product_attention(query, key, value, attn_mask, scale=scale)
+    expected = expected.transpose(1, 2)
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
 
 
@@ -61,6 +62,7 @@ def test_attention_function_supports_gqa():
         scale=0.125,
         enable_gqa=True,
     )
+    expected = expected.transpose(1, 2)
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
 
 

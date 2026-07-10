@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from collections.abc import Collection, Container
+from collections.abc import Collection, Container, Mapping, Sequence
 from contextlib import suppress
 from inspect import signature
 from io import BytesIO
@@ -325,6 +325,9 @@ def export_hyper_onnx(  # noqa: C901
     fold_nodes_to_functions: bool = True,
     fuse_constants_to_function: bool = True,
     external_directory: str | PathLike | None = None,
+    dynamic_axes: Mapping[str, Mapping[int, str]]
+    | Mapping[str, Sequence[int]]
+    | None = None,
     **_: Any,  # ignored options
 ) -> Any | None:
     r"""Export a Pytorch module to ONNX format with hierarchical structure,
@@ -394,6 +397,7 @@ def export_hyper_onnx(  # noqa: C901
                     opset_version=opset_version,
                     dynamo=_dyn,
                     external_data=external_data,
+                    dynamic_axes=dynamic_axes,
                 )
             except RuntimeError as ex:
                 if _dyn == dynamo:

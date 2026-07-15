@@ -174,6 +174,7 @@ def _symbolic_attention_opset18(
 def register_attention_opsets():
     """Register ONNX symbolic for torchscript export path (dynamo=False)."""
 
+    # pylint: disable=import-outside-toplevel
     register = getattr(torch.onnx, "register_custom_op_symbolic", None)
     if register is None:
         from torch.onnx import utils as onnx_utils
@@ -189,7 +190,7 @@ def register_attention_opsets():
     AttentionInterface.register(HYPERONNX_ATTN_IMPL, attention_interface)
 
 
-_HYPER_OPSET = onnxscript.values.Opset(HYPER_DOMAIN, 1)
+_HYPER_OPSET = onnxscript.values.Opset(HYPER_DOMAIN, 1)  # type: ignore
 
 
 @onnxscript.script(_HYPER_OPSET)

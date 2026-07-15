@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,15 +19,15 @@ from collections.abc import Callable
 from enum import Enum
 from inspect import Signature
 from pathlib import Path
-from typing import NotRequired, TypeAlias, TypedDict
+from typing import NotRequired, TypedDict
 
 from onnx import ModelProto
 from torch import Tensor
 from torch.nn import Module
 from torch.utils.hooks import RemovableHandle
 
-AnyTensor: TypeAlias = Tensor | tuple["AnyTensor", ...] | dict[str, "AnyTensor"]
-HookCallback: TypeAlias = Callable[
+type AnyTensor = Tensor | tuple["AnyTensor", ...] | dict[str, "AnyTensor"]
+type HookCallback = Callable[
     [Module, tuple[Tensor], dict[str, AnyTensor], AnyTensor], None
 ]
 

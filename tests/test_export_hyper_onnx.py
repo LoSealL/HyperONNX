@@ -67,7 +67,7 @@ class ModuleTop(torch.nn.Module):
         return x
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_module_with_2_levels(dynamo):
     model = ModuleTop()
     with BytesIO() as f:
@@ -101,7 +101,7 @@ def test_export_module_with_2_levels(dynamo):
     torch.testing.assert_close(torch.from_numpy(z2), ref_output["z2"])
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_module_with_input_dict(dynamo):
     model = ModuleTop()
     with BytesIO() as f:
@@ -129,7 +129,7 @@ def test_export_module_with_input_dict(dynamo):
     torch.testing.assert_close(torch.from_numpy(z2), ref_output["z2"])
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_resnet_with_basicblock_and_bottleneck(dynamo):
     resnet = tv.models.resnet18().eval()
     with BytesIO() as f:
@@ -162,7 +162,7 @@ def test_export_resnet_with_basicblock_and_bottleneck(dynamo):
         raise
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_vit_with_encoder_and_encoderblock(dynamo, tmp_path):
     vit = vit_b_16().eval()
     with BytesIO() as f:
@@ -197,8 +197,8 @@ def test_export_vit_with_encoder_and_encoderblock(dynamo, tmp_path):
         raise
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
-@pytest.mark.parametrize("cache", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
+@pytest.mark.parametrize("cache", [True, False], ids=["cache", "no_cache"])
 def test_export_llama_transformers(dynamo, cache, tmp_path):
     if dynamo:
         pytest.skip("dynamo export not work for llama model yet")
@@ -300,7 +300,7 @@ class RNNLike(torch.nn.Module):
         return x
 
 
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_rnnlike(dynamo):
     model = RNNLike()
     with BytesIO() as f:
@@ -360,8 +360,8 @@ class ModuleReturnNoneTop(torch.nn.Module):
         return ret[0]
 
 
-@pytest.mark.parametrize("accept_none", [True, False])
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("accept_none", [True, False], ids=["accept", "reject"])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_module_return_none(accept_none, dynamo):
     model = ModuleReturnNoneTop(accept_none)
     with BytesIO() as f:
@@ -408,8 +408,8 @@ class ModuleReturnList(torch.nn.Module):
         return outs
 
 
-@pytest.mark.parametrize("return_as_tuple", [True, False])
-@pytest.mark.parametrize("dynamo", [True, False])
+@pytest.mark.parametrize("return_as_tuple", [True, False], ids=["tuple", "list"])
+@pytest.mark.parametrize("dynamo", [True, False], ids=["dynamo", "onnxscript"])
 def test_export_module_return_list(return_as_tuple, dynamo):
     model = ModuleReturnList(return_as_tuple)
     with BytesIO() as f:

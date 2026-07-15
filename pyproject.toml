@@ -28,16 +28,28 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dynamic = ["version", "description"]
-dependencies = ["onnxifier>=2.0.3", "onnxscript<0.6.0", "onnx>=1.18.0"]
+dependencies = ["onnxifier>=2.0.3", "onnxscript", "onnx>=1.18.0"]
 
 [project.urls]
 Home = "https://github.com/LoSealL/hyperonnx"
 Docs = "https://loseall.github.io/hyperonnx"
 
 [project.optional-dependencies]
-cpu = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
-cuda = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
-xpu = ["torch<2.11", "torchvision", "pytorch-triton-xpu"]
+cpu = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
+cuda = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
+xpu = ["torch", "torchvision", "pytorch-triton-xpu"]
+test-torch210-tf560 = [
+    "torch~=2.10.0",
+    "torchvision",
+    "onnxscript~=0.5.0",
+    "transformers~=5.6.0",
+]
+test-torch213-tf56 = [
+    "torch~=2.13.0",
+    "torchvision",
+    "onnxscript~=0.7.0",
+    "transformers>=5.6.0",
+]
 
 [dependency-groups]
 dev = [
@@ -47,7 +59,7 @@ dev = [
     "pyright<=1.1.408",
     "pytest",
     "pytest-cov",
-    "transformers>=4.48.0",
+    "transformers>=5.0.0",
 ]
 
 [tool.setuptools]
@@ -126,13 +138,21 @@ name = "pytorch-cuda130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-[[tool.uv.index]]
-name = "pytorch-cuda131"
-url = "https://download.pytorch.org/whl/cu131"
-explicit = true
-
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "xpu" }, { extra = "cuda" }]]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "xpu" },
+        { extra = "cuda" },
+    ],
+    [
+        { extra = "test-torch210-tf560" },
+        { extra = "test-torch213-tf56" },
+        { extra = "xpu" },
+        { extra = "cuda" },
+    ],
+]
+pip = { torch-backend = "auto" }
 
 [tool.ruff]
 line-length = 88

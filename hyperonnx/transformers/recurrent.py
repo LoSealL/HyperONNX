@@ -284,7 +284,7 @@ def register_recurrent_opsets():
         pass
 
 
-HYPER_OPSET = onnxscript.values.Opset(gated_delta_rule_schema.domain, 1)
+HYPER_OPSET = onnxscript.values.Opset(gated_delta_rule_schema.domain, 1)  # type: ignore
 ONNX_GATED_DELTA_RULE_SCRIPT = f"""
 @onnxscript.script(HYPER_OPSET)
 def onnx_gated_delta_rule(

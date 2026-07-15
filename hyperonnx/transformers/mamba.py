@@ -110,7 +110,7 @@ def register_mamba_opsets():
         pass
 
 
-CAUSAL_OPSET = onnxscript.values.Opset(causal_conv1d_schema.domain, 1)
+CAUSAL_OPSET = onnxscript.values.Opset(causal_conv1d_schema.domain, 1)  # type: ignore
 ONNX_CAUSAL_CONV1D_SCRIPT = f"""
 
 @onnxscript.script(CAUSAL_OPSET)

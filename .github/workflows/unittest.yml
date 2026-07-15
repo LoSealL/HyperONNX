@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12"]
-        transformers-version: ["4.53.0", "5.1.0", "5.6.0"]
+        extra: [test-torch210-tf560, test-torch213-tf56]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -27,12 +27,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: |
-          uv sync --dev --extra=cpu -U
-          uv pip install 'transformers==${{ matrix.transformers-version }}'
+        run: uv sync --dev --extra=cpu --extra=${{ matrix.extra }}
       - name: Run pytest and coverage
         run: |
-          uv run --dev --extra=cpu pytest --cov=hyperonnx --cov-branch --cov-report=xml tests
+          uv run --dev --extra=cpu --extra=${{ matrix.extra }} pytest --cov=hyperonnx --cov-branch --cov-report=xml tests
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:

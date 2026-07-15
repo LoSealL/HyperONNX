@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ from onnxifier.logger import warning
 from torch import Tensor
 
 from ..typing import AnyTensor, ModuleSpec
+
+NAMESPACE = "hyper"
 
 
 def plain_tensor_container(obj: AnyTensor) -> tuple[Tensor, ...]:

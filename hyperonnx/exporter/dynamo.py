@@ -15,141 +15,18 @@ limitations under the License.
 """
 
 import inspect
-from ast import AST
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import contextmanager
 
-import onnxscript
-import onnxscript.ir._schemas as schemas
-import onnxscript.irbuilder as irbuilder
-import onnxscript.sourceinfo
 import torch
 from onnxifier.logger import warning
 from torch.library import custom_op
 from torch.nn import Module
 
 from ..typing import AnyTensor, ExportStatus, ModuleSpec
-from .utils import plain_tensor_container
-
-NAMESPACE = "hyper"
-DOMAIN = onnxscript.values.Opset(domain=NAMESPACE, version=1)
-
-
-def _tensor_dtype_to_onnx_dtype(dtype: torch.dtype):
-    if dtype == torch.float32:
-        return onnxscript.onnx_types.FLOAT
-    elif dtype == torch.float16:
-        return onnxscript.onnx_types.FLOAT16
-    elif dtype == torch.bfloat16:
-        return onnxscript.onnx_types.BFLOAT16
-    elif dtype == torch.float64:
-        return onnxscript.onnx_types.DOUBLE
-    elif dtype == torch.float8_e5m2:
-        return onnxscript.onnx_types.FLOAT8E5M2
-    elif dtype == torch.float8_e5m2fnuz:
-        return onnxscript.onnx_types.FLOAT8E5M2FNUZ
-    elif dtype == torch.float8_e4m3fn:
-        return onnxscript.onnx_types.FLOAT8E4M3FN
-    elif dtype == torch.float8_e4m3fnuz:
-        return onnxscript.onnx_types.FLOAT8E4M3FNUZ
-    elif dtype == torch.int8:
-        return onnxscript.onnx_types.INT8
-    elif dtype == torch.int16:
-        return onnxscript.onnx_types.INT16
-    elif dtype == torch.int32:
-        return onnxscript.onnx_types.INT32
-    elif dtype == torch.int64:
-        return onnxscript.onnx_types.INT64
-    elif dtype == torch.uint8:
-        return onnxscript.onnx_types.UINT8
-    elif dtype == torch.uint16:
-        return onnxscript.onnx_types.UINT16
-    elif dtype == torch.uint32:
-        return onnxscript.onnx_types.UINT32
-    elif dtype == torch.uint64:
-        return onnxscript.onnx_types.UINT64
-    elif dtype == torch.bool:
-        return onnxscript.onnx_types.BOOL
-    raise ValueError(f"Unsupported dtype: {dtype}")
-
-
-def build_onnxscript(spec: ModuleSpec) -> onnxscript.OnnxFunction:
-    """Dynamically build an onnx script for custom translation table."""
-
-    func_name = spec["name"] + "_func"
-    result = irbuilder.IRFunction(func_name, NAMESPACE)
-    # Note: op_name must not be the same as function name, or it would cause
-    # onnx infinite recursion (function referencing itself).
-    op_name = spec["type_name"]
-    stmt = irbuilder.IRStmt([], onnxscript.values.Op(DOMAIN, op_name), [], [])
-    annotations: dict[str, type] = OrderedDict()
-    sig_parameters: list[inspect.Parameter] = []
-    return_types = []
-    for args, name in zip(spec["args"], spec["signature"].parameters):
-        for i, arg in enumerate(plain_tensor_container(args)):
-            if arg is None:
-                continue
-            elif isinstance(arg, str):
-                irtype = onnxscript.onnx_types.STRING
-            else:
-                irtype = _tensor_dtype_to_onnx_dtype(arg.dtype)
-            sourceinfo = onnxscript.sourceinfo.SourceInfo(AST())
-            result.append_input(irbuilder.IRVar(f"{name}:{i}", irtype, sourceinfo))
-            annotations[f"{name}_{i}"] = irtype
-            sig_parameters.append(
-                inspect.Parameter(
-                    name=f"{name}_{i}",
-                    kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                )
-            )
-    if kwargs := spec.get("kwargs"):
-        sig = spec["signature"]
-        ordered_kwargs = {k: kwargs[k] for k in sig.parameters if k in kwargs}
-        for name, args in ordered_kwargs.items():
-            for i, arg in enumerate(plain_tensor_container(args)):
-                if not isinstance(arg, torch.Tensor):
-                    continue
-                irtype = _tensor_dtype_to_onnx_dtype(arg.dtype)
-                sourceinfo = onnxscript.sourceinfo.SourceInfo(AST())
-                result.append_input(irbuilder.IRVar(f"{name}:{i}", irtype, sourceinfo))
-                annotations[f"{name}_{i}"] = irtype
-                sig_parameters.append(
-                    inspect.Parameter(
-                        name=f"{name}_{i}",
-                        kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    )
-                )
-    if "output" in spec:
-        for i, output in enumerate(plain_tensor_container(spec["output"])):
-            irtype = _tensor_dtype_to_onnx_dtype(output.dtype)
-            sourceinfo = onnxscript.sourceinfo.SourceInfo(AST())
-            result.append_output(irbuilder.IRVar(f"output:{i}", irtype, sourceinfo))
-            return_types.append(_tensor_dtype_to_onnx_dtype(output.dtype))
-    stmt.args = [i.name for i in result.inputs]
-    stmt.result = [i.name for i in result.outputs]
-    result.append_stmt(stmt)
-
-    def _f(*args, **kwargs):  # this function does nothing
-        return getattr(DOMAIN, op_name)(*args, **kwargs)
-
-    onnx_fn = onnxscript.OnnxFunction(DOMAIN, _f, result, "", {})
-    if onnx_fn.op_schema is not None:
-        # FIXME: this hack will cause infinite loop during translate the graph in ONNX
-        op_signature = schemas.OpSignature.from_op_schema(onnx_fn.op_schema)
-        onnx_fn.op_signature = op_signature
-        if len(return_types) == 1:
-            annotations["return"] = return_types[0]
-        else:
-            annotations["return"] = tuple[*return_types]  # type: ignore
-        setattr(
-            onnx_fn,
-            "__signature__",
-            inspect.Signature(sig_parameters, return_annotation=annotations["return"]),
-        )
-        setattr(onnx_fn, "__annotations__", annotations)
-
-    return onnx_fn
+from ._onnxscript import build_onnxscript
+from .utils import NAMESPACE, plain_tensor_container
 
 
 def _assign_plain_tensors(container: dict, name: str, value: AnyTensor):

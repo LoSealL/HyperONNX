@@ -106,37 +106,7 @@ def torch_export_handle_lower_version(
         )
     else:
         sign = signature(torch_export)
-        if any(
-            i not in sign.parameters
-            for i in (
-                "kwargs",
-                "export_params",
-                "verbose",
-                "input_names",
-                "output_names",
-                "opset_version",
-                "dynamic_axes",
-                "keep_initializers_as_inputs",
-                "dynamo",
-                "external_data",
-                "dynamic_shapes",
-                # "custom_translation_table",
-                "report",
-                "verify",
-                "profile",
-                "dump_exported_program",
-                "artifacts_dir",
-                "fallback",
-            )
-        ):
-            raise RuntimeError(
-                f"Current PyTorch version is too high: {torch.__version__}, "
-                "Try downgrade to torch>=2.5.0,<2.9.0"
-            )
-        return torch_export(
-            model,
-            args,
-            f,
+        all_kwargs = dict(
             kwargs=kwargs,
             export_params=export_params,
             verbose=verbose,
@@ -156,3 +126,11 @@ def torch_export_handle_lower_version(
             artifacts_dir=artifacts_dir,
             fallback=fallback,
         )
+        # Only pass parameters supported by the current torch version
+        supported: dict = {k: v for k, v in all_kwargs.items() if k in sign.parameters}
+        if all_kwargs.keys() - supported.keys():
+            warnings.warn(
+                f"Some parameters are not supported by the current torch version "
+                f"({torch.__version__}): {all_kwargs.keys() - supported.keys()}"
+            )
+        return torch_export(model, args, f, **supported)

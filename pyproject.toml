@@ -28,16 +28,16 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dynamic = ["version", "description"]
-dependencies = ["onnxifier>=2.0.3", "onnxscript<0.6.0", "onnx>=1.18.0"]
+dependencies = ["onnxifier>=2.0.3", "onnxscript", "onnx>=1.18.0"]
 
 [project.urls]
 Home = "https://github.com/LoSealL/hyperonnx"
 Docs = "https://loseall.github.io/hyperonnx"
 
 [project.optional-dependencies]
-cpu = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
-cuda = ["torch<2.11", "torchvision", "triton-windows; sys_platform == 'win32'"]
-xpu = ["torch<2.11", "torchvision", "pytorch-triton-xpu"]
+cpu = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
+cuda = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
+xpu = ["torch", "torchvision", "pytorch-triton-xpu"]
 
 [dependency-groups]
 dev = [
@@ -124,11 +124,6 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cuda130"
 url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cuda131"
-url = "https://download.pytorch.org/whl/cu131"
 explicit = true
 
 [tool.uv]

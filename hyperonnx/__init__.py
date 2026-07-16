@@ -1,5 +1,5 @@
 """
-Copyright (C) 2025 The HYPERONNX Authors.
+Copyright (C) 2026 The HYPERONNX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,4 +19,4 @@ from .hyper_export import export_hyper_onnx
 from .utils import HYPER_DOMAIN
 
 __all__ = ["auto_trace_method", "export_hyper_onnx", "HYPER_DOMAIN"]
-__version__ = "1.0.4"
+__version__ = "1.0.5"

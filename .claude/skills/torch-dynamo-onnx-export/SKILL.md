@@ -157,6 +157,30 @@ How it works:
 
 Reference: [tests/expoter/test_dynamo_replace_custom_op.py](../../../tests/expoter/test_dynamo_replace_custom_op.py).
 
+### Pattern 3: Attention-specific translation for dynamo
+
+For transformer attention layers:
+
+```python
+import torch
+from hyperonnx.transformers.attention import attention_translation_table
+
+# Step 1: Get the translation table for dynamo path
+translation_table = attention_translation_table()
+
+# Step 2: Export with dynamo=True and the table
+torch.onnx.export(
+    model,
+    example_inputs,
+    'model.onnx',
+    opset_version=24,
+    dynamo=True,
+    custom_translation_table=translation_table,
+)
+```
+
+This uses the modern onnxscript-based Attention definition. See [hyperonnx/transformers/attention.py](../../../hyperonnx/transformers/attention.py) for implementation.
+
 ### Pattern 4: Compile + kernel bundle export
 
 For selective torch.compile with cubin sidecar:
@@ -181,30 +205,6 @@ How it works:
 
 See `docs/superpowers/specs/2026-07-20-compile-and-kernel-export-design.md`
 for the full manifest schema.
-
-### Pattern 3: Attention-specific translation for dynamo
-
-For transformer attention layers:
-
-```python
-import torch
-from hyperonnx.transformers.attention import attention_translation_table
-
-# Step 1: Get the translation table for dynamo path
-translation_table = attention_translation_table()
-
-# Step 2: Export with dynamo=True and the table
-torch.onnx.export(
-    model,
-    example_inputs,
-    'model.onnx',
-    opset_version=24,
-    dynamo=True,
-    custom_translation_table=translation_table,
-)
-```
-
-This uses the modern onnxscript-based Attention definition. See [hyperonnx/transformers/attention.py](../../../hyperonnx/transformers/attention.py) for implementation.
 
 ## Building Custom Operators with onnxscript
 

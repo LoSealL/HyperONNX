@@ -308,6 +308,111 @@ def _export_hiera(
         _job(module, spec)
 
 
+def _collect_and_attach_kernels(
+    model: Module,
+    compile: Collection[type[Module]],
+    module_spec: dict[Module, ModuleSpec],
+    external_directory: str | PathLike | None,
+    compile_static_grid: bool,
+    logger: Logger,
+):
+    """Run torch.compile per marked module and attach kernel bundles."""
+    from pathlib import Path
+
+    import torch
+
+    from .compile.bundle import write_kernel_bundle
+    from .compile.capture import capture_compiled_kernels
+
+    if not external_directory:
+        logger.warning("compile requested but external_directory is None; skipping.")
+        return
+    out_dir = Path(external_directory)
+
+    for module in model.modules():
+        if type(module) not in compile:
+            continue
+        spec = module_spec.get(module)
+        if spec is None or spec.get("status") != ExportStatus.EXPORTED:
+            continue
+        with capture_compiled_kernels(static_grid=compile_static_grid) as sink:
+            try:
+                compiled = torch.compile(module)
+                compiled(*spec["args"], **(spec.get("kwargs") or {}))
+            except Exception as exc:
+                logger.warning(
+                    f"torch.compile failed for {type(module).__name__}: {exc}"
+                )
+                continue
+        if not sink.kernels:
+            logger.warning(
+                f"no kernels captured for {type(module).__name__}; "
+                "module may be fully eager."
+            )
+            continue
+        type_name = spec["type_name"]
+        module_meta = {
+            "type_name": type_name,
+            "python_class": f"{type(module).__module__}.{type(module).__qualname__}",
+            "torch_version": torch.__version__,
+            "triton_version": _safe_triton_version(),
+        }
+        io = {
+            "inputs": _spec_io(spec["args"], spec.get("kwargs", {}), spec["signature"]),
+            "outputs": _spec_io_from_output(spec.get("output")),
+        }
+        write_kernel_bundle(
+            directory=out_dir,
+            type_name=type_name,
+            kernels=sink.kernels,
+            io=io,
+            module_meta=module_meta,
+        )
+
+
+def _safe_triton_version() -> str:
+    try:
+        import triton
+
+        return triton.__version__
+    except Exception:
+        return "unknown"
+
+
+def _spec_io(args, kwargs, signature) -> list[dict]:
+    from .exporter.utils import plain_tensor_container
+
+    out: list[dict] = []
+    params = signature.parameters
+    for arg, name in zip(args, params):
+        for t in plain_tensor_container(arg):
+            out.append(
+                {
+                    "name": name,
+                    "dtype": str(t.dtype).replace("torch.", ""),
+                    "shape": list(t.shape),
+                }
+            )
+    return out
+
+
+def _spec_io_from_output(output) -> list[dict]:
+    from .exporter.utils import plain_tensor_container
+
+    if output is None:
+        return []
+    out: list[dict] = []
+    for t in plain_tensor_container(output):
+        out.append(
+            {
+                "name": "output",
+                "dtype": str(t.dtype).replace("torch.", ""),
+                "shape": list(t.shape),
+            }
+        )
+    return out
+
+
 def export_hyper_onnx(  # noqa: C901
     model: Module,
     input_args: tuple,
@@ -320,6 +425,8 @@ def export_hyper_onnx(  # noqa: C901
     dynamo: bool = False,
     external_data: bool = False,
     hiera: Collection[type[Module]] | None = None,
+    compile: Collection[type[Module]] | None = None,
+    compile_static_grid: bool = False,
     module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
     fold_nodes_to_functions: bool = True,
@@ -369,6 +476,8 @@ def export_hyper_onnx(  # noqa: C901
 
     model_typename = type(model).__name__
     logger = nest(model_typename)
+    if compile:
+        hiera = set(hiera or []) | set(compile)
     if _:
         ignored_params = "\n  ".join(_.keys())
         logger.warning(f"These arguments are ignored:\n  {ignored_params}")
@@ -433,6 +542,16 @@ def export_hyper_onnx(  # noqa: C901
         hiera=hiera,
         logger=logger,
     )
+
+    if compile:
+        _collect_and_attach_kernels(
+            model=model,
+            compile=compile,
+            module_spec=module_spec,
+            external_directory=external_directory,
+            compile_static_grid=compile_static_grid,
+            logger=logger,
+        )
 
     if model in module_spec:
         spec = module_spec[model]

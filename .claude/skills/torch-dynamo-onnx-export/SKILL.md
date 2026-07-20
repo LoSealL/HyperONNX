@@ -157,6 +157,31 @@ How it works:
 
 Reference: [tests/expoter/test_dynamo_replace_custom_op.py](../../../tests/expoter/test_dynamo_replace_custom_op.py).
 
+### Pattern 4: Compile + kernel bundle export
+
+For selective torch.compile with cubin sidecar:
+
+```python
+export_hyper_onnx(
+    model,
+    args,
+    'model.onnx',
+    compile=[Attention],      # auto-promoted into hiera
+    compile_static_grid=True, # skip AST extraction for fixed shapes
+    dynamo=True,
+)
+```
+
+How it works:
+1. HyperONNX runs the existing hiera flow to build the ONNX function body.
+2. For each compiled module, torch.compile is invoked under a triton hook
+   that captures every CompiledKernel.
+3. cubin bytes + descriptor are written to `<TypeName>.kernels/` next to
+   the function ONNX. The ONNX graph is never mutated.
+
+See `docs/superpowers/specs/2026-07-20-compile-and-kernel-export-design.md`
+for the full manifest schema.
+
 ### Pattern 3: Attention-specific translation for dynamo
 
 For transformer attention layers:

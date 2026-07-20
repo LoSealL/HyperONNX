@@ -326,6 +326,10 @@ def _collect_and_attach_kernels(
     from .compile.bundle import write_kernel_bundle
     from .compile.capture import capture_compiled_kernels
 
+    if not hasattr(torch, "compile"):
+        raise RuntimeError(
+            "torch.compile not available; requires torch>=2.0 for compile="
+        )
     if not external_directory:
         logger.warning("compile requested but external_directory is None; skipping.")
         return
@@ -341,19 +345,11 @@ def _collect_and_attach_kernels(
             TemporaryDirectory(prefix="hyperonnx_inductor_") as cache_dir,
             capture_compiled_kernels(static_grid=compile_static_grid) as sink,
         ):
-            # Force inductor cache miss so the triton listener fires; without
-            # this, a warm inductor cache short-circuits triton compilation.
             orig_cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
             try:
                 compiled = torch.compile(module)
                 compiled(*spec["args"], **(spec.get("kwargs") or {}))
-            except Exception as exc:
-                logger.warning(
-                    f"torch.compile failed for {type(module).__name__}: {exc}"
-                )
-                # ponytail: continue on the next module even if env var was set
-                continue
             finally:
                 if orig_cache_dir is None:
                     os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
@@ -398,16 +394,31 @@ def _spec_io(args, kwargs, signature) -> list[dict]:
     from .exporter.utils import plain_tensor_container
 
     out: list[dict] = []
-    params = signature.parameters
-    for arg, name in zip(args, params):
+    params = list(signature.parameters.values())[1:]  # skip self
+    # positional args
+    for arg, param in zip(args, params):
         for t in plain_tensor_container(arg):
             out.append(
                 {
-                    "name": name,
+                    "name": param.name,
                     "dtype": str(t.dtype).replace("torch.", ""),
                     "shape": list(t.shape),
                 }
             )
+    # kwargs not already covered positionally
+    covered = {p.name for p in params[: len(args)]}
+    for param in params[len(args) :]:
+        if param.name in covered:
+            continue
+        if param.name in kwargs:
+            for t in plain_tensor_container(kwargs[param.name]):
+                out.append(
+                    {
+                        "name": param.name,
+                        "dtype": str(t.dtype).replace("torch.", ""),
+                        "shape": list(t.shape),
+                    }
+                )
     return out
 
 
@@ -416,16 +427,24 @@ def _spec_io_from_output(output) -> list[dict]:
 
     if output is None:
         return []
-    out: list[dict] = []
-    for t in plain_tensor_container(output):
-        out.append(
+    tensors = plain_tensor_container(output)
+    if len(tensors) <= 1:
+        return [
             {
                 "name": "output",
                 "dtype": str(t.dtype).replace("torch.", ""),
                 "shape": list(t.shape),
             }
-        )
-    return out
+            for t in tensors
+        ]
+    return [
+        {
+            "name": f"output_{i}",
+            "dtype": str(t.dtype).replace("torch.", ""),
+            "shape": list(t.shape),
+        }
+        for i, t in enumerate(tensors)
+    ]
 
 
 def export_hyper_onnx(  # noqa: C901

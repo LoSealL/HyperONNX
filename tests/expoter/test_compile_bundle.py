@@ -102,3 +102,23 @@ def test_grid_expr_serializes_when_present(tmp_path: Path):
     )
     data = json.loads((out / "manifest.json").read_text())
     assert data["kernels"][0]["launch"]["grid_expr"] == [{"op": "const", "value": 1}]
+
+
+def test_captured_grid_null_serializes(tmp_path: Path):
+    # v1 emits captured_grid=null (the inductor wrapper hook is not wired in).
+    k = _fake_kernel("k0")
+    k["launch"]["captured_grid"] = None
+    out = write_kernel_bundle(
+        directory=tmp_path,
+        type_name="A",
+        kernels=[k],
+        io={"inputs": [], "outputs": []},
+        module_meta={
+            "type_name": "A",
+            "python_class": "X",
+            "torch_version": "1",
+            "triton_version": "1",
+        },
+    )
+    data = json.loads((out / "manifest.json").read_text())
+    assert data["kernels"][0]["launch"]["captured_grid"] is None

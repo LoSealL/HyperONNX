@@ -190,9 +190,11 @@ export_hyper_onnx(
     model,
     args,
     'model.onnx',
-    compile=[Attention],      # auto-promoted into hiera
-    compile_static_grid=True, # skip AST extraction for fixed shapes
+    compile=[Attention],              # auto-promoted into hiera
+    compile_static_grid=True,         # skip AST extraction for fixed shapes
     dynamo=True,
+    external_data=True,               # required for kernel bundle
+    external_directory="out/",        # required for kernel bundle
 )
 ```
 

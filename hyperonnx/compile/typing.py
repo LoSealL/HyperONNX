@@ -41,7 +41,7 @@ class LaunchDescriptor(TypedDict):
     shared_mem_bytes: int
     num_regs: int
     grid_expr: list[GridAstNode] | None
-    captured_grid: list[int]
+    captured_grid: list[int] | None
 
 
 class CompiledKernelInfo(TypedDict):

@@ -47,7 +47,7 @@ class CaptureSink:
             shared_mem_bytes=int(getattr(meta, "shared", 0)),
             num_regs=int(getattr(meta, "num_regs", 0)),
             grid_expr=None,
-            captured_grid=[0, 0, 0],
+            captured_grid=None,
         )
         args = _infer_args(meta)
         self.kernels.append(
@@ -157,9 +157,24 @@ def capture_compiled_kernels(static_grid: bool = False):
     Yields:
         CaptureSink populated as kernels compile.
     """
+    # ponytail: grid AST extraction (compile_static_grid=False path) is a no-op
+    # in v1 because the inductor wrapper-codegen hook is not yet implemented.
+    # All kernels get grid_expr=null. The grid_sources dict stays empty, so the
+    # post-yield translate_grid loop never runs. The translate_grid/evaluate_grid
+    # functions in grid_ast.py are tested and ready for v1.1 — see spec §"Grid AST".
     from triton.knobs import compilation as kc
 
     sink = CaptureSink()
+    if not hasattr(kc, "listener"):
+        # ponytail: triton < 3.7 (torch < 2.10) has no compilation listener hook.
+        # Compile capture is silently disabled; the ONNX function still exports.
+        warning(
+            "triton.knobs.compilation.listener not available "
+            "(triton < 3.7 / torch < 2.10); compile capture disabled."
+        )
+        yield sink
+        return
+
     orig_listener = kc.listener
 
     def _listener(*, src, metadata, metadata_group, times, cache_hit):

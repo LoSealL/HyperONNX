@@ -40,7 +40,7 @@ class LaunchDescriptor(TypedDict):
     num_ctas: int
     shared_mem_bytes: int
     num_regs: int
-    grid_expr: GridAstNode | None
+    grid_expr: list[GridAstNode] | None
     captured_grid: list[int]
 
 

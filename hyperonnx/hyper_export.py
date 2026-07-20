@@ -317,7 +317,9 @@ def _collect_and_attach_kernels(
     logger: Logger,
 ):
     """Run torch.compile per marked module and attach kernel bundles."""
+    import os
     from pathlib import Path
+    from tempfile import TemporaryDirectory
 
     import torch
 
@@ -335,7 +337,14 @@ def _collect_and_attach_kernels(
         spec = module_spec.get(module)
         if spec is None or spec.get("status") != ExportStatus.EXPORTED:
             continue
-        with capture_compiled_kernels(static_grid=compile_static_grid) as sink:
+        with (
+            TemporaryDirectory(prefix="hyperonnx_inductor_") as cache_dir,
+            capture_compiled_kernels(static_grid=compile_static_grid) as sink,
+        ):
+            # Force inductor cache miss so the triton listener fires; without
+            # this, a warm inductor cache short-circuits triton compilation.
+            orig_cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
             try:
                 compiled = torch.compile(module)
                 compiled(*spec["args"], **(spec.get("kwargs") or {}))
@@ -343,7 +352,13 @@ def _collect_and_attach_kernels(
                 logger.warning(
                     f"torch.compile failed for {type(module).__name__}: {exc}"
                 )
+                # ponytail: continue on the next module even if env var was set
                 continue
+            finally:
+                if orig_cache_dir is None:
+                    os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
+                else:
+                    os.environ["TORCHINDUCTOR_CACHE_DIR"] = orig_cache_dir
         if not sink.kernels:
             logger.warning(
                 f"no kernels captured for {type(module).__name__}; "

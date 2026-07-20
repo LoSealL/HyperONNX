@@ -12,6 +12,16 @@ import torch
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_inductor_cache(tmp_path, monkeypatch):
+    # ponytail: inductor's on-disk cache sits above triton.compile, so a hit
+    # short-circuits the listener entirely. Force a fresh cache dir per test
+    # so every torch.compile actually reaches triton.
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor"))
+    torch._dynamo.reset()
+    yield
+
+
 class _Compiled(torch.nn.Module):
     def forward(self, x):
         return torch.relu(x) + 1.0

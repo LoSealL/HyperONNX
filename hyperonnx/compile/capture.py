@@ -63,6 +63,29 @@ class CaptureSink:
     def attach_grid_source(self, kernel_name: str, source: str) -> None:
         self.grid_sources[kernel_name] = source
 
+    def record_from_listener(
+        self, src: Any, metadata: dict, metadata_group: dict
+    ) -> None:
+        """Build a CompiledKernel from listener data and record it.
+
+        The listener passes raw metadata dict + metadata_group (filename->path).
+        We construct a CompiledKernel the same way triton.compiler.compile does,
+        so the existing record() method works unchanged.
+        """
+        from triton.compiler import CompiledKernel
+
+        name = metadata.get("name", f"kernel_{len(self.kernels)}")
+        # ponytail: hash is not surfaced by the listener API; our capture path
+        # never reads ck.hash, so a placeholder is fine. If a future consumer
+        # needs the real hash, plumb it through the listener upstream.
+        try:
+            ck = CompiledKernel(src, metadata_group, hash="listener_captured")
+        except Exception as exc:
+            warning(f"failed to construct CompiledKernel for {name}: {exc}")
+            return
+        target = _extract_target_from_metadata(metadata)
+        self.record(ck, target=target)
+
 
 def _binary_ext_for_target(target: Any) -> str:
     backend = getattr(target, "backend", None) if target else None
@@ -71,6 +94,30 @@ def _binary_ext_for_target(target: Any) -> str:
     if backend == "hip":
         return "hsaco"
     return "cubin"
+
+
+def _extract_target_from_metadata(metadata: dict) -> Any:
+    """Reconstruct a GPUTarget-like object from a listener metadata dict.
+
+    The listener serializes metadata via `namedtuple._asdict()`, which only
+    converts the top level — nested namedtuples stay as namedtuples. So
+    `metadata['target']` may be a dict (JSON round-tripped) or a real
+    GPUTarget. Both expose the attributes `record()` needs, so we just pass
+    the value through when it isn't a dict.
+    """
+    from types import SimpleNamespace
+
+    target = metadata.get("target")
+    if target is None:
+        return None
+    if isinstance(target, dict):
+        return SimpleNamespace(
+            backend=target.get("backend", "cuda"),
+            arch=target.get("arch", "sm_70"),
+            warp_size=int(target.get("warp_size", 32)),
+        )
+    # Already a GPUTarget-like (namedtuple / object with attrs).
+    return target
 
 
 def _target_to_dict(target: Any) -> GPUTarget:
@@ -98,10 +145,11 @@ def extract_grid_value(lam: Any, meta: dict) -> tuple[int, ...] | None:
 
 @contextmanager
 def capture_compiled_kernels(static_grid: bool = False):
-    """Monkey-patch triton.compiler.compile to capture every compiled kernel.
+    """Install a triton compilation listener to capture every compiled kernel.
 
-    The patched function returns the original CompiledKernel unchanged (pure spy).
-    Grid AST extraction is skipped entirely when static_grid=True.
+    Uses triton's official `knobs.compilation.listener` hook. The listener is
+    called for both cache hits and misses, with full metadata + metadata_group
+    (which maps filenames like 'kernel.cubin' to local filesystem paths).
 
     Args:
         static_grid: if True, leave grid_expr=None for every captured kernel.
@@ -109,24 +157,22 @@ def capture_compiled_kernels(static_grid: bool = False):
     Yields:
         CaptureSink populated as kernels compile.
     """
-    import triton.compiler as tc
+    from triton.knobs import compilation as kc
 
     sink = CaptureSink()
-    orig_compile = tc.compile
+    orig_listener = kc.listener
 
-    def _spy(src, target=None, options=None, **kw):
-        ck = orig_compile(src, target, options, **kw)
+    def _listener(*, src, metadata, metadata_group, times, cache_hit):
         try:
-            sink.record(ck, target)
+            sink.record_from_listener(src, metadata, metadata_group)
         except Exception as exc:
             warning(f"capture failed for kernel: {exc}")
-        return ck
 
-    tc.compile = _spy
+    kc.listener = _listener
     try:
         yield sink
     finally:
-        tc.compile = orig_compile
+        kc.listener = orig_listener
 
     if not static_grid:
         for name, source in sink.grid_sources.items():

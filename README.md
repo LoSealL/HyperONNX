@@ -122,6 +122,34 @@ with (
 ```
 
 ![qwen2](docs/assets/qwen2_omni_vision.gif)
+
+### 3) Export compiled modules with CUDA kernel bundle
+
+Mark specific modules with `compile=` to `torch.compile` them during export.
+A `<TypeName>.kernels/` sidecar directory is written next to each compiled
+module's ONNX function, containing the cubin files and a `manifest.json`.
+
+```python
+export_hyper_onnx(
+    model,
+    (torch.randn(8, 768),),
+    "model.onnx",
+    hiera=[DecoderLayer, Attention],
+    compile=[Attention],            # Attention gets a kernel bundle
+    compile_static_grid=False,      # set True to skip grid AST extraction
+    dynamo=True,
+    external_data=True,
+    external_directory="out/",
+)
+```
+
+The ONNX function body remains the portable fallback. The kernel bundle is
+a pure sidecar — deleting it makes the model behave as if `compile=None`.
+
+Note: `torch.compile` is cached per Python process by dynamo. If you call
+`export_hyper_onnx(..., compile=...)` twice on the same model in the same
+process, call `torch._dynamo.reset()` between calls so the compile capture
+fires again.
 ---
 
 If you run into issues or want to contribute, feel free to open an Issue or PR. 💡

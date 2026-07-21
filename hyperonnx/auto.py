@@ -94,11 +94,26 @@ class AutoTraceMethod(Module):
         dynamo: bool = False,
         external_data: bool = False,
         hiera: Collection[type[Module]] | None = None,
+        compile: Collection[type[Module]] | None = None,
+        compile_static_grid: bool = False,
         module_spec: dict[Module, ModuleSpec] | None = None,
         do_optimization: bool = True,
         external_directory: str | PathLike | None = None,
     ):
-        """Export onnx model according to the traced data."""
+        """Export onnx model according to the traced data.
+
+        Forwards every argument verbatim to
+        :func:`hyperonnx.hyper_export.export_hyper_onnx`; see that function's
+        docstring for the full semantics of ``hiera``, ``compile`` and
+        ``compile_static_grid``. ``compile`` requires ``external_directory``
+        (or :func:`export_hyper_onnx` will skip kernel capture with a
+        warning).
+
+        When ``expected_stages > 1`` each stage is exported into its own
+        file and its own subdirectory under ``external_directory``
+        (``<external_directory>/<i>/``); a single ``BytesIO`` target is
+        rejected because it cannot hold multiple stages.
+        """
         if not self.pos_args and not self.kwargs:
             raise RuntimeError(
                 "No input data traced, did you call the method under context "
@@ -137,6 +152,8 @@ class AutoTraceMethod(Module):
                     dynamo=dynamo,
                     external_data=external_data,
                     hiera=hiera,
+                    compile=compile,
+                    compile_static_grid=compile_static_grid,
                     module_spec=module_spec,
                     do_optimization=do_optimization,
                     external_directory=external_directory,

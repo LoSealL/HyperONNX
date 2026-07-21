@@ -181,6 +181,33 @@ torch.onnx.export(
 
 This uses the modern onnxscript-based Attention definition. See [hyperonnx/transformers/attention.py](../../../hyperonnx/transformers/attention.py) for implementation.
 
+### Pattern 4: Compile + kernel bundle export
+
+For selective torch.compile with cubin sidecar:
+
+```python
+export_hyper_onnx(
+    model,
+    args,
+    'model.onnx',
+    compile=[Attention],              # auto-promoted into hiera
+    compile_static_grid=True,         # skip AST extraction for fixed shapes
+    dynamo=True,
+    external_data=True,               # required for kernel bundle
+    external_directory="out/",        # required for kernel bundle
+)
+```
+
+How it works:
+1. HyperONNX runs the existing hiera flow to build the ONNX function body.
+2. For each compiled module, torch.compile is invoked under a triton hook
+   that captures every CompiledKernel.
+3. cubin bytes + descriptor are written to `<TypeName>.kernels/` next to
+   the function ONNX. The ONNX graph is never mutated.
+
+See `docs/superpowers/specs/2026-07-20-compile-and-kernel-export-design.md`
+for the full manifest schema.
+
 ## Building Custom Operators with onnxscript
 
 ### Overview

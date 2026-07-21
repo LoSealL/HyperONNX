@@ -122,6 +122,33 @@ with (
 ```
 
 ![qwen2](docs/assets/qwen2_omni_vision.gif)
+
+### 3) 导出编译模块及其 CUDA kernel 包
+
+通过 `compile=` 标记需要编译的模块，导出时会对其执行 `torch.compile`。
+每个被编译模块的 ONNX function 旁边会写出一个 `<TypeName>.kernels/`
+sidecar 目录，其中包含 cubin 文件和一个 `manifest.json`。
+
+```python
+export_hyper_onnx(
+    model,
+    (torch.randn(8, 768),),
+    "model.onnx",
+    hiera=[DecoderLayer, Attention],
+    compile=[Attention],            # Attention gets a kernel bundle
+    compile_static_grid=False,      # set True to skip grid AST extraction
+    dynamo=True,
+    external_data=True,
+    external_directory="out/",
+)
+```
+
+ONNX function 主体仍然是可移植的回退实现。kernel 包是纯 sidecar ——
+删除它后，模型行为与 `compile=None` 完全一致。
+
+注意：`torch.compile` 在同一个 Python 进程中会被 dynamo 缓存。如果在
+同一进程中对同一模型调用两次 `export_hyper_onnx(..., compile=...)`，
+请在两次调用之间执行 `torch._dynamo.reset()`，以便重新触发编译捕获。
 ---
 
 如果你在使用中遇到问题或希望贡献代码，欢迎提 Issue 或 PR。💡

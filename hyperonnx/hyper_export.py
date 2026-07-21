@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os
 from collections.abc import Collection, Container, Mapping, Sequence
 from contextlib import suppress
 from inspect import signature
@@ -25,12 +26,15 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import onnx
+import torch
 from onnxifier import ONNXIFIER_OPSET, OnnxGraph, PassManager
 from onnxifier.logger import nest
 from onnxifier.utils import chdir, legalize_path_name
 from torch import Tensor
 from torch.nn import Module
 
+from .compile.bundle import write_kernel_bundle
+from .compile.capture import capture_compiled_kernels
 from .exporter import replace_with_duck_module
 from .exporter.utils import detach_module_outputs, plain_tensor_container
 from .function_rewriter import (
@@ -317,15 +321,6 @@ def _collect_and_attach_kernels(
     logger: Logger,
 ):
     """Run torch.compile per marked module and attach kernel bundles."""
-    import os
-    from pathlib import Path
-    from tempfile import TemporaryDirectory
-
-    import torch
-
-    from .compile.bundle import write_kernel_bundle
-    from .compile.capture import capture_compiled_kernels
-
     if not hasattr(torch, "compile"):
         raise RuntimeError(
             "torch.compile not available; requires torch>=2.0 for compile="
@@ -368,7 +363,7 @@ def _collect_and_attach_kernels(
             "torch_version": torch.__version__,
             "triton_version": _safe_triton_version(),
         }
-        io = {
+        module_io = {
             "inputs": _spec_io(spec["args"], spec.get("kwargs", {}), spec["signature"]),
             "outputs": _spec_io_from_output(spec.get("output")),
         }
@@ -376,7 +371,7 @@ def _collect_and_attach_kernels(
             directory=out_dir,
             type_name=type_name,
             kernels=sink.kernels,
-            io=io,
+            module_io=module_io,
             module_meta=module_meta,
         )
 
@@ -390,61 +385,39 @@ def _safe_triton_version() -> str:
         return "unknown"
 
 
-def _spec_io(args, kwargs, signature) -> list[dict]:
-    from .exporter.utils import plain_tensor_container
+def _tensor_meta(name: str, t: Tensor) -> dict:
+    return {
+        "name": name,
+        "dtype": str(t.dtype).replace("torch.", ""),
+        "shape": list(t.shape),
+    }
 
+
+def _spec_io(args, kwargs, signature) -> list[dict]:
     out: list[dict] = []
     params = list(signature.parameters.values())[1:]  # skip self
     # positional args
     for arg, param in zip(args, params):
-        for t in plain_tensor_container(arg):
-            out.append(
-                {
-                    "name": param.name,
-                    "dtype": str(t.dtype).replace("torch.", ""),
-                    "shape": list(t.shape),
-                }
-            )
+        out.extend(_tensor_meta(param.name, t) for t in plain_tensor_container(arg))
     # kwargs not already covered positionally
     covered = {p.name for p in params[: len(args)]}
     for param in params[len(args) :]:
-        if param.name in covered:
+        if param.name in covered or param.name not in kwargs:
             continue
-        if param.name in kwargs:
-            for t in plain_tensor_container(kwargs[param.name]):
-                out.append(
-                    {
-                        "name": param.name,
-                        "dtype": str(t.dtype).replace("torch.", ""),
-                        "shape": list(t.shape),
-                    }
-                )
+        out.extend(
+            _tensor_meta(param.name, t)
+            for t in plain_tensor_container(kwargs[param.name])
+        )
     return out
 
 
 def _spec_io_from_output(output) -> list[dict]:
-    from .exporter.utils import plain_tensor_container
-
     if output is None:
         return []
     tensors = plain_tensor_container(output)
     if len(tensors) <= 1:
-        return [
-            {
-                "name": "output",
-                "dtype": str(t.dtype).replace("torch.", ""),
-                "shape": list(t.shape),
-            }
-            for t in tensors
-        ]
-    return [
-        {
-            "name": f"output_{i}",
-            "dtype": str(t.dtype).replace("torch.", ""),
-            "shape": list(t.shape),
-        }
-        for i, t in enumerate(tensors)
-    ]
+        return [_tensor_meta("output", t) for t in tensors]
+    return [_tensor_meta(f"output_{i}", t) for i, t in enumerate(tensors)]
 
 
 def export_hyper_onnx(  # noqa: C901

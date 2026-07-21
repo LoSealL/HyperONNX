@@ -14,10 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import NotRequired, TypedDict
-
-type GridAstNode = dict
-type GridLiteral = tuple[int, ...] | list[int] | None
+from typing import TypedDict
 
 
 class GPUTarget(TypedDict):
@@ -26,22 +23,11 @@ class GPUTarget(TypedDict):
     warp_size: int
 
 
-class KernelArgDescriptor(TypedDict):
-    kind: str  # "tensor" | "scalar"
-    name: str
-    dtype: str
-    elem_offset: NotRequired[int]
-    value: NotRequired[int]
-    from_: NotRequired[dict]  # serialized with key "from"
-
-
 class LaunchDescriptor(TypedDict):
     num_warps: int
     num_ctas: int
     shared_mem_bytes: int
     num_regs: int
-    grid_expr: list[GridAstNode] | None
-    captured_grid: list[int] | None
 
 
 class CompiledKernelInfo(TypedDict):
@@ -49,7 +35,6 @@ class CompiledKernelInfo(TypedDict):
     symbol: str
     device_target: GPUTarget
     launch: LaunchDescriptor
-    args: list[KernelArgDescriptor]
 
 
 class KernelEntry(TypedDict):
@@ -58,8 +43,6 @@ class KernelEntry(TypedDict):
     symbol: str
     device_target: GPUTarget
     launch: LaunchDescriptor
-    args: list[KernelArgDescriptor]
-    variants: list
 
 
 class KernelBundleManifest(TypedDict):

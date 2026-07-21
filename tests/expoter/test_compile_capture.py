@@ -12,12 +12,10 @@ import pytest
 
 from hyperonnx.compile.capture import (
     CaptureSink,
-    _attach_ast_to_kernel,
     _binary_ext_for_target,
     _extract_target_from_metadata,
     _target_to_dict,
     capture_compiled_kernels,
-    extract_grid_value,
 )
 
 triton = pytest.importorskip("triton")
@@ -85,7 +83,6 @@ class _StubCompiledKernel:
 def test_capture_sink_initially_empty():
     sink = CaptureSink()
     assert sink.kernels == []
-    assert sink.grid_sources == {}
 
 
 def test_listener_records_kernel(tmp_path: Path):
@@ -94,7 +91,7 @@ def test_listener_records_kernel(tmp_path: Path):
     metadata_group = _write_stub_cubin(tmp_path)
     metadata = _stub_metadata()
 
-    with capture_compiled_kernels(static_grid=True) as sink:
+    with capture_compiled_kernels() as sink:
         # Simulate triton calling the listener
         knobs.compilation.listener(
             src=_StubSrc(),
@@ -109,7 +106,6 @@ def test_listener_records_kernel(tmp_path: Path):
     assert entry["cubin_bytes"] == b"\x00\x01\x02FAKE"
     assert entry["symbol"] == "stub_kernel_0"
     assert entry["launch"]["num_warps"] == 4
-    assert entry["launch"]["grid_expr"] is None
     assert entry["device_target"]["backend"] == "cuda"
 
 
@@ -117,26 +113,9 @@ def test_listener_restores_original():
     import triton.knobs as knobs
 
     orig = knobs.compilation.listener
-    with capture_compiled_kernels(static_grid=True):
+    with capture_compiled_kernels():
         pass
     assert knobs.compilation.listener is orig
-
-
-def test_capture_static_grid_skips_ast(tmp_path: Path):
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=True) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
 
 
 # ---- record() method coverage ----------------------------------------------
@@ -225,21 +204,18 @@ def test_binary_ext_for_none_target_defaults_to_cubin():
     assert _binary_ext_for_target(None) == "cubin"
 
 
-def test_extract_target_from_metadata_dict():
-    """Dict target is converted to SimpleNamespace."""
-    metadata = {"target": {"backend": "cuda", "arch": "sm_90", "warp_size": 32}}
-    target = _extract_target_from_metadata(metadata)
-    assert target.backend == "cuda"
-    assert target.arch == "sm_90"
-    assert target.warp_size == 32
+def test_extract_target_from_metadata_returns_dict_as_is():
+    """Dict target is returned as-is (now that _target_to_dict duck-types)."""
+    target_dict = {"backend": "cuda", "arch": "sm_90", "warp_size": 32}
+    metadata = {"target": target_dict}
+    assert _extract_target_from_metadata(metadata) is target_dict
 
 
 def test_extract_target_from_metadata_passes_through_object():
     """Non-dict target is returned as-is (namedtuple / object with attrs)."""
     original = SimpleNamespace(backend="hip", arch="gfx90a", warp_size=64)
     metadata = {"target": original}
-    target = _extract_target_from_metadata(metadata)
-    assert target is original
+    assert _extract_target_from_metadata(metadata) is original
 
 
 def test_extract_target_from_metadata_none_when_absent():
@@ -253,132 +229,19 @@ def test_target_to_dict_with_partial_object():
     assert result == {"backend": "cuda", "arch": "sm_70", "warp_size": 32}
 
 
-# ---- extract_grid_value() coverage -----------------------------------------
+def test_target_to_dict_with_dict_input():
+    """_target_to_dict duck-types dict input (from listener metadata)."""
+    result = _target_to_dict({"backend": "hip", "arch": "gfx90a", "warp_size": 64})
+    assert result == {"backend": "hip", "arch": "gfx90a", "warp_size": 64}
 
 
-def test_extract_grid_value_from_callable():
-    """When lam is callable, it's invoked with meta."""
-    lam = lambda meta: (4, 8, 1)  # noqa: E731
-    assert extract_grid_value(lam, {}) == (4, 8, 1)
+def test_target_to_dict_with_partial_dict():
+    """_target_to_dict uses .get defaults for missing keys."""
+    result = _target_to_dict({})
+    assert result == {"backend": "cuda", "arch": "sm_70", "warp_size": 32}
 
 
-def test_extract_grid_value_from_raw_tuple():
-    """When lam is not callable, it's treated as the grid directly."""
-    assert extract_grid_value((2, 4, 1), {}) == (2, 4, 1)
-
-
-def test_extract_grid_value_returns_none_on_exception():
-    """Exceptions are caught and None is returned."""
-    result = extract_grid_value(None, {})  # iter(None) raises
-    assert result is None
-
-
-# ---- _attach_ast_to_kernel() coverage --------------------------------------
-
-
-def test_attach_ast_to_kernel_updates_matching_symbol():
-    """AST is attached to the kernel with matching symbol."""
-    sink = CaptureSink()
-    sink.kernels.append(
-        {
-            "symbol": "k0",
-            "launch": {"grid_expr": None},
-        }
-    )
-    ast = [{"op": "const", "value": 1}]
-    _attach_ast_to_kernel(sink, "k0", ast)
-    assert sink.kernels[0]["launch"]["grid_expr"] is ast
-
-
-def test_attach_ast_to_kernel_no_match_is_noop():
-    """When no kernel matches, nothing changes."""
-    sink = CaptureSink()
-    sink.kernels.append(
-        {
-            "symbol": "k0",
-            "launch": {"grid_expr": None},
-        }
-    )
-    _attach_ast_to_kernel(sink, "nonexistent", [{"op": "const", "value": 1}])
-    assert sink.kernels[0]["launch"]["grid_expr"] is None
-
-
-# ---- attach_grid_source() coverage -----------------------------------------
-
-
-def test_attach_grid_source_stores_source():
-    sink = CaptureSink()
-    sink.attach_grid_source("k0", "return (1,)")
-    assert sink.grid_sources == {"k0": "return (1,)"}
-
-
-# ---- capture_compiled_kernels() non-static path ----------------------------
-
-
-def test_capture_dynamic_grid_runs_ast_loop_on_no_sources(tmp_path: Path):
-    """With static_grid=False, the post-yield AST loop runs (but is a no-op
-    when grid_sources is empty)."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-    # grid_sources is empty in v1, so grid_expr stays None even with
-    # static_grid=False.
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
-
-
-def test_capture_dynamic_grid_with_untranslatable_source(tmp_path: Path):
-    """When grid_sources has an untranslatable source, AST stays None and
-    the warning is logged."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-        # Populate grid_sources after recording so the post-yield loop has
-        # something to translate. Use an untranslatable expression.
-        sink.grid_sources["stub_kernel_0"] = "return (unknown_func(x),)"
-    # AST extraction failed silently; grid_expr remains None
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
-
-
-def test_capture_dynamic_grid_with_valid_source(tmp_path: Path):
-    """When grid_sources has a valid cdiv source, AST is attached."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-        sink.grid_sources["stub_kernel_0"] = "return (cdiv(M, 128),)"
-    assert len(sink.kernels) == 1
-    grid_expr = sink.kernels[0]["launch"]["grid_expr"]
-    assert grid_expr is not None
-    assert grid_expr[0]["op"] == "cdiv"
+# ---- capture_compiled_kernels() listener error path -----------------------
 
 
 def test_listener_callback_swallows_record_exceptions(tmp_path: Path):
@@ -392,7 +255,7 @@ def test_listener_callback_swallows_record_exceptions(tmp_path: Path):
     metadata = _stub_metadata()
 
     with (
-        capture_compiled_kernels(static_grid=True),
+        capture_compiled_kernels(),
         patch.object(
             CaptureSink,
             "record_from_listener",

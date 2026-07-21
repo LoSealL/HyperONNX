@@ -118,26 +118,6 @@ def test_compile_auto_promotes_into_hiera(tmp_path: Path):
     assert len(bundles) == 1
 
 
-def test_compile_static_grid_skips_ast(tmp_path: Path):
-    from hyperonnx import export_hyper_onnx
-
-    model = _Parent().cuda()
-    args = (torch.randn(2, 4, device="cuda"),)
-    export_hyper_onnx(
-        model,
-        args,
-        str(tmp_path / "m.onnx"),
-        compile=[_Compiled],
-        compile_static_grid=True,
-        dynamo=True,
-        external_data=True,
-        external_directory=str(tmp_path),
-    )
-    bundle = next(tmp_path.glob("*.kernels"))
-    data = json.loads((bundle / "manifest.json").read_text())
-    assert all(k["launch"]["grid_expr"] is None for k in data["kernels"])
-
-
 def test_bundle_deletion_leaves_valid_model(tmp_path: Path):
     import onnx
 

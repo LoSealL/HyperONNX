@@ -21,10 +21,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from onnxifier.logger import debug, warning
+from onnxifier.logger import warning
 
-from .grid_ast import NotTranslatable, translate_grid
-from .typing import CompiledKernelInfo, GPUTarget, KernelArgDescriptor, LaunchDescriptor
+from .typing import CompiledKernelInfo, GPUTarget, LaunchDescriptor
 
 _DEFAULT_TARGET: GPUTarget = {"backend": "cuda", "arch": "sm_70", "warp_size": 32}
 
@@ -32,7 +31,6 @@ _DEFAULT_TARGET: GPUTarget = {"backend": "cuda", "arch": "sm_70", "warp_size": 3
 @dataclass
 class CaptureSink:
     kernels: list[CompiledKernelInfo] = field(default_factory=list)
-    grid_sources: dict[str, str] = field(default_factory=dict)
 
     def record(self, compiled_kernel: Any, target: Any = None) -> None:
         meta = getattr(compiled_kernel, "metadata", None)
@@ -49,22 +47,15 @@ class CaptureSink:
             num_ctas=int(getattr(meta, "num_ctas", 1)),
             shared_mem_bytes=int(getattr(meta, "shared", 0)),
             num_regs=int(getattr(meta, "num_regs", 0)),
-            grid_expr=None,
-            captured_grid=None,
         )
-        args = _infer_args(meta)
         self.kernels.append(
             CompiledKernelInfo(
                 cubin_bytes=cubin_bytes,
                 symbol=name,
                 device_target=gpu_target,
                 launch=launch,
-                args=args,
             )
         )
-
-    def attach_grid_source(self, kernel_name: str, source: str) -> None:
-        self.grid_sources[kernel_name] = source
 
     def record_from_listener(
         self, src: Any, metadata: dict, metadata_group: dict
@@ -92,79 +83,39 @@ class CaptureSink:
 
 def _binary_ext_for_target(target: Any) -> str:
     backend = getattr(target, "backend", None) if target else None
-    if backend == "cuda":
-        return "cubin"
-    if backend == "hip":
-        return "hsaco"
-    return "cubin"
+    return "hsaco" if backend == "hip" else "cubin"
 
 
 def _extract_target_from_metadata(metadata: dict) -> Any:
-    """Reconstruct a GPUTarget-like object from a listener metadata dict.
+    """Return the raw target from listener metadata, or None if absent.
 
     The listener serializes metadata via `namedtuple._asdict()`, which only
-    converts the top level — nested namedtuples stay as namedtuples. So
-    `metadata['target']` may be a dict (JSON round-tripped) or a real
-    GPUTarget. Both expose the attributes `record()` needs, so we just pass
-    the value through when it isn't a dict.
+    converts the top level — nested namedtuples stay as namedtuples. We pass
+    the value through; `_target_to_dict` duck-types dict vs object.
     """
-    from types import SimpleNamespace
-
-    target = metadata.get("target")
-    if target is None:
-        return None
-    if isinstance(target, dict):
-        return SimpleNamespace(
-            backend=target.get("backend", "cuda"),
-            arch=target.get("arch", "sm_70"),
-            warp_size=int(target.get("warp_size", 32)),
-        )
-    # Already a GPUTarget-like (namedtuple / object with attrs).
-    return target
+    return metadata.get("target")
 
 
 def _target_to_dict(target: Any) -> GPUTarget:
+    get = target.get if isinstance(target, dict) else lambda k, d: getattr(target, k, d)
     return {
-        "backend": getattr(target, "backend", "cuda"),
-        "arch": getattr(target, "arch", "sm_70"),
-        "warp_size": int(getattr(target, "warp_size", 32)),
+        "backend": get("backend", "cuda"),
+        "arch": get("arch", "sm_70"),
+        "warp_size": int(get("warp_size", 32)),
     }
 
 
-def _infer_args(meta: Any) -> list[KernelArgDescriptor]:
-    # ponytail: v1 records minimal arg metadata. A complete args list
-    # requires parsing inductor's wrapper code, deferred to v1.1.
-    return []
-
-
-def extract_grid_value(lam: Any, meta: dict) -> tuple[int, ...] | None:
-    try:
-        out: Any = lam(meta) if callable(lam) else lam
-        return tuple(int(x) for x in out)
-    except Exception as exc:
-        debug(f"grid extraction failed: {exc}")
-        return None
-
-
 @contextmanager
-def capture_compiled_kernels(static_grid: bool = False):
+def capture_compiled_kernels():
     """Install a triton compilation listener to capture every compiled kernel.
 
     Uses triton's official `knobs.compilation.listener` hook. The listener is
     called for both cache hits and misses, with full metadata + metadata_group
     (which maps filenames like 'kernel.cubin' to local filesystem paths).
 
-    Args:
-        static_grid: if True, leave grid_expr=None for every captured kernel.
-
     Yields:
         CaptureSink populated as kernels compile.
     """
-    # ponytail: grid AST extraction (compile_static_grid=False path) is a no-op
-    # in v1 because the inductor wrapper-codegen hook is not yet implemented.
-    # All kernels get grid_expr=null. The grid_sources dict stays empty, so the
-    # post-yield translate_grid loop never runs. The translate_grid/evaluate_grid
-    # functions in grid_ast.py are tested and ready for v1.1 — see spec §"Grid AST".
     from triton.knobs import compilation as kc
 
     sink = CaptureSink()
@@ -191,22 +142,3 @@ def capture_compiled_kernels(static_grid: bool = False):
         yield sink
     finally:
         kc.listener = orig_listener
-
-    if not static_grid:
-        for name, source in sink.grid_sources.items():
-            try:
-                ast = translate_grid(source)
-            except NotTranslatable as exc:
-                debug(f"grid AST untranslatable for {name}: {exc}")
-                continue
-            except Exception as exc:
-                warning(f"grid AST failed for {name}: {exc}")
-                continue
-            _attach_ast_to_kernel(sink, name, ast)
-
-
-def _attach_ast_to_kernel(sink: CaptureSink, name: str, ast: list[dict] | None) -> None:
-    for k in sink.kernels:
-        if k["symbol"] == name:
-            k["launch"]["grid_expr"] = ast
-            return

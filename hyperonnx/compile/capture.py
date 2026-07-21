@@ -92,11 +92,7 @@ class CaptureSink:
 
 def _binary_ext_for_target(target: Any) -> str:
     backend = getattr(target, "backend", None) if target else None
-    if backend == "cuda":
-        return "cubin"
-    if backend == "hip":
-        return "hsaco"
-    return "cubin"
+    return "hsaco" if backend == "hip" else "cubin"
 
 
 def _extract_target_from_metadata(metadata: dict) -> Any:

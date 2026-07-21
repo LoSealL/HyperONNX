@@ -29,7 +29,7 @@ def write_kernel_bundle(
     directory: Path,
     type_name: str,
     kernels: list[CompiledKernelInfo],
-    io: dict,
+    module_io: dict,
     module_meta: dict,
 ) -> Path:
     """Write the kernel bundle sidecar directory.
@@ -45,7 +45,8 @@ def write_kernel_bundle(
         directory: parent directory (typically external_directory).
         type_name: module spec type_name (e.g. "Attention:0").
         kernels: list of captured kernels.
-        io: {"inputs": [...], "outputs": [...]} mirroring the ONNX function.
+        module_io: {"inputs": [...], "outputs": [...]} mirroring the ONNX
+            function. Serialized as the `io` key in the manifest JSON.
         module_meta: provenance dict with python_class / torch_version / etc.
 
     Returns:
@@ -61,7 +62,7 @@ def write_kernel_bundle(
         (bundle_dir / cubin_filename).write_bytes(k["cubin_bytes"])
         entries.append(
             KernelEntry(
-                id=f"kernel_{i:04d}",
+                id=cubin_filename.removesuffix(".cubin"),
                 cubin=cubin_filename,
                 symbol=k["symbol"],
                 device_target=k["device_target"],
@@ -74,7 +75,7 @@ def write_kernel_bundle(
     manifest = KernelBundleManifest(
         schema_version=_SCHEMA_VERSION,
         module=module_meta,
-        io=io,
+        io=module_io,
         kernels=entries,
     )
     manifest_path = bundle_dir / "manifest.json"

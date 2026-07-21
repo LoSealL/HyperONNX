@@ -13,6 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+# pyright: reportMissingImports=none
+# triton is an optional runtime dependency (win32 in the cpu extra, linux via
+# the cuda/xpu extras). Imports are lazy and feature-checked at runtime.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -72,9 +75,7 @@ class CaptureSink:
         We construct a CompiledKernel the same way triton.compiler.compile does,
         so the existing record() method works unchanged.
         """
-        from triton.compiler import (
-            CompiledKernel,  # pyright: ignore[reportMissingImports]
-        )
+        from triton.compiler import CompiledKernel
 
         name = metadata.get("name", f"kernel_{len(self.kernels)}")
         # ponytail: hash is not surfaced by the listener API; our capture path
@@ -164,7 +165,7 @@ def capture_compiled_kernels(static_grid: bool = False):
     # All kernels get grid_expr=null. The grid_sources dict stays empty, so the
     # post-yield translate_grid loop never runs. The translate_grid/evaluate_grid
     # functions in grid_ast.py are tested and ready for v1.1 — see spec §"Grid AST".
-    from triton.knobs import compilation as kc  # pyright: ignore[reportMissingImports]
+    from triton.knobs import compilation as kc
 
     sink = CaptureSink()
     if not hasattr(kc, "listener"):

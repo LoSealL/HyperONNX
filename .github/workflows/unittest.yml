@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12"]
-        extra: [test-torch210-tf560, test-torch213-tf56]
+        extra: [test-torch210-tf560, test-torch213-tf513]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6

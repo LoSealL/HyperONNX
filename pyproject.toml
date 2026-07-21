@@ -44,11 +44,11 @@ test-torch210-tf560 = [
     "onnxscript~=0.5.0",
     "transformers~=5.6.0",
 ]
-test-torch213-tf56 = [
+test-torch213-tf513 = [
     "torch~=2.13.0",
     "torchvision",
     "onnxscript~=0.7.0",
-    "transformers>=5.6.0",
+    "transformers~=5.13.0",
 ]
 
 [dependency-groups]
@@ -147,7 +147,7 @@ conflicts = [
     ],
     [
         { extra = "test-torch210-tf560" },
-        { extra = "test-torch213-tf56" },
+        { extra = "test-torch213-tf513" },
         { extra = "xpu" },
         { extra = "cuda" },
     ],

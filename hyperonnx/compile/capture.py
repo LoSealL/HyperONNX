@@ -27,14 +27,44 @@ from .grid_ast import NotTranslatable, translate_grid
 from .typing import CompiledKernelInfo, GPUTarget, KernelArgDescriptor, LaunchDescriptor
 
 _DEFAULT_TARGET: GPUTarget = {"backend": "cuda", "arch": "sm_70", "warp_size": 32}
+"""Fallback ``GPUTarget`` when the listener does not surface one.
+
+Used only on the ``record_from_listener`` path when the upstream metadata
+dict has no ``target`` key; production runs on a real GPU always carry a
+populated target, so this is a debug/CI safety net rather than a default
+that ships in a real bundle.
+"""
 
 
 @dataclass
 class CaptureSink:
+    """Accumulator for kernels seen by the triton compilation listener.
+
+    A fresh instance is created per ``capture_compiled_kernels`` context.
+    ``record_from_listener`` is the entry point invoked by triton's hook;
+    the recorded entries are drained by ``write_kernel_bundle`` once the
+    context exits. ``grid_sources`` is the seam for the v1.1 grid-AST
+    pipeline (the inductor wrapper-codegen hook that feeds it is not yet
+    wired in, so it stays empty in v1).
+    """
+
     kernels: list[CompiledKernelInfo] = field(default_factory=list)
     grid_sources: dict[str, str] = field(default_factory=dict)
 
     def record(self, compiled_kernel: Any, target: Any = None) -> None:
+        """Extract cubin + metadata from a triton ``CompiledKernel``.
+
+        Args:
+            compiled_kernel: a ``triton.compiler.CompiledKernel`` (or any
+                duck-typed object exposing ``asm`` and ``metadata``).
+            target: optional ``GPUTarget``-like; falls back to
+                ``_DEFAULT_TARGET`` when omitted (e.g. listener path with
+                no target dict).
+
+        Returns ``None``; on success the new ``CompiledKernelInfo`` is
+        appended to :attr:`kernels`. Kernels with no capturable binary are
+        logged and skipped (the ONNX function stays a valid fallback).
+        """
         meta = getattr(compiled_kernel, "metadata", None)
         name = getattr(meta, "name", f"kernel_{len(self.kernels)}")
         asm = getattr(compiled_kernel, "asm", {}) or {}
@@ -64,6 +94,13 @@ class CaptureSink:
         )
 
     def attach_grid_source(self, kernel_name: str, source: str) -> None:
+        """Stash a grid-lambda source body for later AST translation.
+
+        Called by the inductor wrapper-codegen hook (not yet wired in v1).
+        ``capture_compiled_kernels`` drains this dict on exit, translating
+        each source via ``grid_ast.translate_grid`` and attaching the
+        result to the matching kernel entry.
+        """
         self.grid_sources[kernel_name] = source
 
     def record_from_listener(
@@ -91,6 +128,11 @@ class CaptureSink:
 
 
 def _binary_ext_for_target(target: Any) -> str:
+    """Pick the ``asm`` key holding the kernel binary for a backend.
+
+    CUDA → ``"cubin"``, HIP → ``"hsaco"``. Any other backend defaults to
+    ``"cubin"``; add a branch when a third backend ships.
+    """
     backend = getattr(target, "backend", None) if target else None
     return "hsaco" if backend == "hip" else "cubin"
 
@@ -120,6 +162,11 @@ def _extract_target_from_metadata(metadata: dict) -> Any:
 
 
 def _target_to_dict(target: Any) -> GPUTarget:
+    """Coerce a triton ``GPUTarget`` (namedtuple) into the manifest TypedDict.
+
+    ``getattr`` defaults keep capture alive when triton adds new required
+    fields without bumping the listener contract.
+    """
     return {
         "backend": getattr(target, "backend", "cuda"),
         "arch": getattr(target, "arch", "sm_70"),
@@ -134,6 +181,13 @@ def _infer_args(meta: Any) -> list[KernelArgDescriptor]:
 
 
 def extract_grid_value(lam: Any, meta: dict) -> tuple[int, ...] | None:
+    """Best-effort evaluation of a grid lambda against autotuner ``meta``.
+
+    Used to populate ``launch.captured_grid``. Returns ``None`` on any
+    exception (callable raises, non-integral result, etc.); the caller
+    then leaves ``captured_grid`` null and the runtime falls back to the
+    ONNX function per the static-match contract.
+    """
     try:
         out: Any = lam(meta) if callable(lam) else lam
         return tuple(int(x) for x in out)
@@ -202,6 +256,12 @@ def capture_compiled_kernels(static_grid: bool = False):
 
 
 def _attach_ast_to_kernel(sink: CaptureSink, name: str, ast: list[dict] | None) -> None:
+    """Write a translated grid AST back onto the matching kernel entry.
+
+    Lookup is by ``symbol`` (== ``metadata.name`` from triton). No-op when
+    no kernel with that symbol was captured; the corresponding grid stays
+    ``null`` and the runtime falls back to the ONNX function per contract.
+    """
     for k in sink.kernels:
         if k["symbol"] == name:
             k["launch"]["grid_expr"] = ast

@@ -23,6 +23,11 @@ from onnxifier.utils import legalize_path_name
 from .typing import CompiledKernelInfo, KernelBundleManifest, KernelEntry
 
 _SCHEMA_VERSION = 1
+"""Kernel-bundle manifest schema version.
+
+Bump when ``KernelBundleManifest`` gains a breaking field; runtimes gate
+dispatch on this and must refuse unknown versions rather than guess.
+"""
 
 
 def write_kernel_bundle(

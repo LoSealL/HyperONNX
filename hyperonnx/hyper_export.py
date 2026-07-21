@@ -320,7 +320,32 @@ def _collect_and_attach_kernels(
     compile_static_grid: bool,
     logger: Logger,
 ):
-    """Run torch.compile per marked module and attach kernel bundles."""
+    """Run ``torch.compile`` per marked module and attach kernel bundles.
+
+    Iterates over ``model.modules()`` and, for every module whose type is in
+    ``compile`` and whose spec has already reached ``EXPORTED`` state,
+    re-runs the module under ``torch.compile`` inside a
+    :func:`capture_compiled_kernels` context. Captured kernels are written
+    to a sibling ``<type_name>.kernels/`` bundle via
+    :func:`write_kernel_bundle`.
+
+    Inductor's cache dir is forced to a fresh ``TemporaryDirectory`` per
+    module to guarantee a cache miss — otherwise previously-compiled
+    kernels may not re-fire the triton listener and the bundle would be
+    silently empty.
+
+    Args:
+        model: the top-level model being exported.
+        compile: module types selected for kernel capture; same matching
+            rule as ``hiera`` (``type(child) in compile``).
+        module_spec: shared spec dict from :func:`trace_module_spec`.
+        external_directory: where to drop the bundle; when ``None`` the
+            whole step is skipped with a warning (kernels cannot be
+            inlined into the ONNX file).
+        compile_static_grid: forwarded to the capture context; when
+            ``True``, grid-AST extraction is bypassed.
+        logger: nested logger from :func:`hyper_export`.
+    """
     if not hasattr(torch, "compile"):
         raise RuntimeError(
             "torch.compile not available; requires torch>=2.0 for compile="
@@ -377,6 +402,13 @@ def _collect_and_attach_kernels(
 
 
 def _safe_triton_version() -> str:
+    """Return the installed triton version, or ``"unknown"`` on any failure.
+
+    Triton is an optional dependency (CPU/win32 installs omit it) and is
+    only needed for the compile-capture path. The string is purely
+    provenance for the manifest, so a missing import must never abort the
+    export.
+    """
     try:
         import triton  # pyright: ignore[reportMissingImports]
 
@@ -386,6 +418,12 @@ def _safe_triton_version() -> str:
 
 
 def _tensor_meta(name: str, t: Tensor) -> dict:
+    """Serialise one tensor as a ``{name, dtype, shape}`` manifest entry.
+
+    Shape is materialised as a plain list so downstream ``json.dumps`` of
+    the manifest needs no custom encoder; dtype is normalised to drop the
+    ``torch.`` prefix (``"torch.float16"`` → ``"float16"``).
+    """
     return {
         "name": name,
         "dtype": str(t.dtype).replace("torch.", ""),
@@ -394,6 +432,15 @@ def _tensor_meta(name: str, t: Tensor) -> dict:
 
 
 def _spec_io(args, kwargs, signature) -> list[dict]:
+    """Build the manifest ``io.inputs`` list for one module's spec.
+
+    Walks the module's forward ``signature`` (skipping ``self``), pairing
+    positional ``args`` and any non-positional ``kwargs`` with their param
+    names. Each tensor found is flattened via
+    :func:`plain_tensor_container` and emitted through
+    :func:`_tensor_meta`, preserving declaration order so the manifest
+    matches the ONNX function signature exactly.
+    """
     out: list[dict] = []
     params = list(signature.parameters.values())[1:]  # skip self
     # positional args
@@ -412,6 +459,12 @@ def _spec_io(args, kwargs, signature) -> list[dict]:
 
 
 def _spec_io_from_output(output) -> list[dict]:
+    """Build the manifest ``io.outputs`` list from a module's traced output.
+
+    Single-tensor outputs are named ``"output"``; multi-tensor outputs are
+    indexed ``"output_0"``, ``"output_1"``, … mirroring the existing
+    ``_get_output_names`` convention used to label the ONNX graph.
+    """
     if output is None:
         return []
     tensors = plain_tensor_container(output)
@@ -467,6 +520,18 @@ def export_hyper_onnx(  # noqa: C901
             the model architecture.
         hiera (Optional[Collection[type[Module]]]): A container of types of module to be
             composed as a onnx function.
+        compile (Optional[Collection[type[Module]]]): A container of module types to
+            additionally run through ``torch.compile`` and capture as a kernel
+            bundle. ``compile`` is a strict subset of ``hiera``: any type in
+            ``compile`` but not ``hiera`` is auto-promoted. Each captured
+            module produces a sibling ``<type_name>.kernels/`` directory next
+            to its ONNX function body; deleting that directory yields a model
+            indistinguishable from one exported without ``compile``. Requires
+            ``external_directory`` (kernels cannot be inlined into the ONNX).
+        compile_static_grid (bool): When True, skip grid-AST extraction and
+            leave ``launch.grid_expr`` null for every captured kernel. Use for
+            fixed-shape deployments where the runtime will only ever launch
+            on the captured shape. Defaults to False.
         module_spec (Optional[Dict[Module, ModuleSpec]]): A dictionary to store the
             detail spec of modules.
         do_optimization: Whether to optimize the exported ONNX model.

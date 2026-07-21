@@ -22,6 +22,11 @@ class NotTranslatable(Exception):
     """Raised when a grid expression cannot be translated to the v1 AST."""
 
 
+# Maps ``ast.BinOp`` operator node types to the v1 AST ``op`` name, or
+# ``None`` when the operator is recognised-but-unsupported (used to keep
+# Add in the dict so it produces a precise "not in v1 node set" error
+# instead of the generic "unsupported BinOp" path). Add a new mapping to
+# extend the v1 op set; ``NotTranslatable`` is raised for anything missing.
 _ALLOWED_BINOPS = {
     pyast.Add: None,
     pyast.Mult: "mul",
@@ -30,6 +35,13 @@ _ALLOWED_BINOPS = {
 
 
 def _translate_expr(node: pyast.AST) -> dict:
+    """Translate one Python AST node into a v1 grid-AST dict.
+
+    Walks ``Constant`` / ``Name`` / ``Call`` / ``BinOp`` / ``Subscript``
+    only — anything else raises :class:`NotTranslatable` and the caller
+    downgrades the whole kernel to ``grid_expr=None``. The accepted node
+    set matches the runtime contract in the design doc's "Grid AST" table.
+    """
     if isinstance(node, pyast.Constant) and isinstance(node.value, int):
         return {"op": "const", "value": node.value}
     if isinstance(node, pyast.Name):

@@ -7,7 +7,11 @@ is verified in the Tier 2 integration tests.
 
 from pathlib import Path
 
+import pytest
+
 from hyperonnx.compile.capture import CaptureSink, capture_compiled_kernels
+
+triton = pytest.importorskip("triton")
 
 
 def _write_stub_cubin(tmp: Path) -> dict:

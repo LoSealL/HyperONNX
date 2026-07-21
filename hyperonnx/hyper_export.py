@@ -383,7 +383,7 @@ def _collect_and_attach_kernels(
 
 def _safe_triton_version() -> str:
     try:
-        import triton
+        import triton  # pyright: ignore[reportMissingImports]
 
         return triton.__version__
     except Exception:

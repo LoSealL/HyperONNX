@@ -72,7 +72,9 @@ class CaptureSink:
         We construct a CompiledKernel the same way triton.compiler.compile does,
         so the existing record() method works unchanged.
         """
-        from triton.compiler import CompiledKernel
+        from triton.compiler import (
+            CompiledKernel,  # pyright: ignore[reportMissingImports]
+        )
 
         name = metadata.get("name", f"kernel_{len(self.kernels)}")
         # ponytail: hash is not surfaced by the listener API; our capture path
@@ -136,7 +138,7 @@ def _infer_args(meta: Any) -> list[KernelArgDescriptor]:
 
 def extract_grid_value(lam: Any, meta: dict) -> tuple[int, ...] | None:
     try:
-        out = lam(meta) if callable(lam) else lam
+        out: Any = lam(meta) if callable(lam) else lam
         return tuple(int(x) for x in out)
     except Exception as exc:
         debug(f"grid extraction failed: {exc}")
@@ -162,7 +164,7 @@ def capture_compiled_kernels(static_grid: bool = False):
     # All kernels get grid_expr=null. The grid_sources dict stays empty, so the
     # post-yield translate_grid loop never runs. The translate_grid/evaluate_grid
     # functions in grid_ast.py are tested and ready for v1.1 — see spec §"Grid AST".
-    from triton.knobs import compilation as kc
+    from triton.knobs import compilation as kc  # pyright: ignore[reportMissingImports]
 
     sink = CaptureSink()
     if not hasattr(kc, "listener"):

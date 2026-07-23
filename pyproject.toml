@@ -36,15 +36,22 @@ Docs = "https://loseall.github.io/hyperonnx"
 
 [project.optional-dependencies]
 cpu = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
-cuda = ["torch", "torchvision", "triton-windows; sys_platform == 'win32'"]
+cuda = [
+    "torch",
+    "torchvision",
+    "triton-windows; sys_platform == 'win32'",
+    "cuda-python>=12.9.4",
+]
 xpu = ["torch", "torchvision", "pytorch-triton-xpu"]
 test-torch210-tf560 = [
+    "cuda-python>=12.9.4",
     "torch~=2.10.0",
     "torchvision",
     "onnxscript~=0.5.0",
     "transformers~=5.6.0",
 ]
 test-torch213-tf513 = [
+    "cuda-python>=12.9.4",
     "torch~=2.13.0",
     "torchvision",
     "onnxscript~=0.7.0",

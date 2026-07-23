@@ -18,7 +18,7 @@ Shared TypedDicts for the compile / kernel-bundle subsystem.
 These structures are the in-memory mirror of the JSON manifest that ships next
 to each compiled ONNX function (see ``bundle.write_kernel_bundle`` and the
 ``Kernel bundle manifest schema`` section of the compile-and-kernel-export
-design doc). They are intentionally plain ``TypedDict``\s rather than dataclasses
+design doc). They are intentionally plain ``TypedDict``\\s rather than dataclasses
 so that ``json.dumps``/``json.loads`` round-trips require no adapter layer.
 """
 
@@ -58,16 +58,23 @@ class KernelArgDescriptor(TypedDict):
 
     A C/C++/Rust runtime reads ``args[i]`` to know how to push kernel
     arguments via the CUDA Driver API. The ``kind`` discriminates the union:
-    ``"tensor"`` arguments carry ``elem_offset``; ``"scalar`` arguments
+    ``"tensor"`` arguments carry ``buffer_id`` (v1 launch-trace path) or
+    ``elem_offset`` (v1.1 inductor-wrapper path); ``"scalar`` arguments
     either carry a literal ``value`` (compile-time constant) or a ``from_``
     descriptor (derived from an input's shape or another arg).
+
+    Only ``kind`` is always present; the rest are ``NotRequired`` because the
+    v1 launch trace emits minimal dicts (e.g. ``{"kind": "tensor",
+    "buffer_id": n}``) and enriches them in later versions.
     """
 
     kind: str  # "tensor" | "scalar"
-    name: str
-    dtype: str
-    elem_offset: NotRequired[int]
-    value: NotRequired[int]
+    name: NotRequired[str]
+    dtype: NotRequired[str]
+    buffer_id: NotRequired[int]  # v1 launch-trace: device buffer id
+    direction: NotRequired[str]  # "out" for write-back pointers (out_ptr*)
+    elem_offset: NotRequired[int]  # v1.1: per-slot element offset
+    value: NotRequired[int | float]
     from_: NotRequired[dict]  # serialized with key "from"
 
 
@@ -100,6 +107,12 @@ class CompiledKernelInfo(TypedDict):
     device_target: GPUTarget
     launch: LaunchDescriptor
     args: list[KernelArgDescriptor]
+    ttir: NotRequired[str]
+    """Triton IR (TTIR) text — the high-level kernel representation before
+    GPU-specific lowering. Absent when the backend provides no IR."""
+    ttgir: NotRequired[str]
+    """Triton GPU IR (TTGIR) text — the GPU-specific lowered representation
+    (blocks, warps, shared memory). Absent when the backend provides no IR."""
 
 
 class KernelEntry(TypedDict):
@@ -119,6 +132,22 @@ class KernelEntry(TypedDict):
     variants: list
 
 
+class BufferEntry(TypedDict):
+    """One device buffer used by the kernel sequence.
+
+    ``kind`` discriminates: ``input`` (user-provided at replay),
+    ``parameter`` (loaded from ``file``), ``intermediate`` (zeroed),
+    ``output`` (produced by the kernel sequence).
+    """
+
+    id: int
+    kind: str
+    dtype: str
+    shape: list[int]
+    name: NotRequired[str]
+    file: NotRequired[str]
+
+
 class KernelBundleManifest(TypedDict):
     """Top-level manifest.json schema.
 
@@ -132,3 +161,13 @@ class KernelBundleManifest(TypedDict):
     module: dict
     io: dict
     kernels: list[KernelEntry]
+    buffers: NotRequired[list[BufferEntry]]
+    vendor_lib: NotRequired[dict]
+    """Present when the graph delegates ops to a vendor library (cuDNN/cuBLAS).
+
+    Recorded as ``{"unwritten_buffers": [buffer_id, ...]}`` — device buffers
+    no captured triton kernel wrote, so they stay zero at replay. The bundle
+    is still written (all triton kernels dump normally); a downstream runtime
+    reads this key to know it must fill those buffers itself or fall back to
+    the ONNX function for the affected subgraph. Absent ⇒ full coverage.
+    """

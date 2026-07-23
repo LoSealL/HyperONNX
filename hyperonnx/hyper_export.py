@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import ast
 import os
 from collections.abc import Collection, Container, Mapping, Sequence
 from contextlib import suppress
@@ -34,7 +35,11 @@ from torch import Tensor
 from torch.nn import Module
 
 from .compile.bundle import write_kernel_bundle
-from .compile.capture import capture_compiled_kernels
+from .compile.capture import (
+    capture_compiled_kernels,
+    capture_launch_trace,
+    capture_vendor_ops,
+)
 from .exporter import replace_with_duck_module
 from .exporter.utils import detach_module_outputs, plain_tensor_container
 from .function_rewriter import (
@@ -314,7 +319,7 @@ def _export_hiera(
 
 def _collect_and_attach_kernels(
     model: Module,
-    compile: Collection[type[Module]],
+    compile_hier: Collection[type[Module]],
     module_spec: dict[Module, ModuleSpec],
     external_directory: str | PathLike | None,
     compile_static_grid: bool,
@@ -323,7 +328,7 @@ def _collect_and_attach_kernels(
     """Run ``torch.compile`` per marked module and attach kernel bundles.
 
     Iterates over ``model.modules()`` and, for every module whose type is in
-    ``compile`` and whose spec has already reached ``EXPORTED`` state,
+    ``compile_hier`` and whose spec has already reached ``EXPORTED`` state,
     re-runs the module under ``torch.compile`` inside a
     :func:`capture_compiled_kernels` context. Captured kernels are written
     to a sibling ``<type_name>.kernels/`` bundle via
@@ -336,8 +341,8 @@ def _collect_and_attach_kernels(
 
     Args:
         model: the top-level model being exported.
-        compile: module types selected for kernel capture; same matching
-            rule as ``hiera`` (``type(child) in compile``).
+        compile_hier: module types selected for kernel capture; same matching
+            rule as ``hiera`` (``type(child) in compile_hier``).
         module_spec: shared spec dict from :func:`trace_module_spec`.
         external_directory: where to drop the bundle; when ``None`` the
             whole step is skipped with a warning (kernels cannot be
@@ -356,32 +361,54 @@ def _collect_and_attach_kernels(
     out_dir = Path(external_directory)
 
     for module in model.modules():
-        if type(module) not in compile:
+        if type(module) not in compile_hier:
             continue
         spec = module_spec.get(module)
         if spec is None or spec.get("status") != ExportStatus.EXPORTED:
             continue
+        wrapper_text = None
         with (
             TemporaryDirectory(prefix="hyperonnx_inductor_") as cache_dir,
             capture_compiled_kernels(static_grid=compile_static_grid) as sink,
+            capture_launch_trace(module, spec["args"], spec.get("kwargs")) as trace,
+            capture_vendor_ops() as vendor_ops,
         ):
             orig_cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
             try:
-                compiled = torch.compile(module)
-                compiled(*spec["args"], **(spec.get("kwargs") or {}))
+                # ponytail: inference_mode keeps the capture eval-only; without it
+                # auto-dynamic recompiles can emit CPU fallback nodes that need a
+                # C++ compiler (cl.exe) which headless Windows boxes lack
+                with torch.inference_mode():
+                    compiled = torch.compile(module)
+                    output = compiled(*spec["args"], **(spec.get("kwargs") or {}))
+                    trace.identify_output(output)
             finally:
                 if orig_cache_dir is None:
                     os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
                 else:
                     os.environ["TORCHINDUCTOR_CACHE_DIR"] = orig_cache_dir
+            # Extract the inductor wrapper's def call() body while cache_dir
+            # still exists. Only needed when vendor-lib gaps are detected —
+            # the wrapper shows how triton kernels and extern_kernels calls
+            # interleave (the execution procedure for a mixed graph).
+            gaps = trace.vendor_lib_gaps()
+            if gaps:
+                wrapper_text = _extract_inductor_wrapper(Path(cache_dir))
+        type_name = spec["type_name"]
         if not sink.kernels:
             logger.warning(
                 f"no kernels captured for {type(module).__name__}; "
                 "module may be fully eager."
             )
             continue
-        type_name = spec["type_name"]
+        if gaps:
+            logger.warning(
+                f"partial triton capture for {type(module).__name__}: "
+                f"{len(gaps)} buffer(s) produced by a vendor library "
+                f"(cuDNN/cuBLAS, no cubin) — bundle written with "
+                f"'vendor_lib' marker; affected ops stay in ONNX"
+            )
         module_meta = {
             "type_name": type_name,
             "python_class": f"{type(module).__module__}.{type(module).__qualname__}",
@@ -398,7 +425,38 @@ def _collect_and_attach_kernels(
             kernels=sink.kernels,
             module_io=module_io,
             module_meta=module_meta,
+            launch_trace=trace,
+            vendor_ops=vendor_ops,
+            wrapper_text=wrapper_text,
         )
+
+
+def _extract_inductor_wrapper(cache_dir: Path) -> str | None:
+    """Find and extract the ``def call()`` body from inductor's generated wrapper.
+
+    Inductor writes a ``.py`` wrapper per compiled graph into the cache dir.
+    The wrapper embeds triton kernel sources (redundant with cubins) plus a
+    ``def call(self, args):`` body that is the authoritative execution order —
+    showing how triton kernel launches and ``extern_kernels`` (cuDNN/cuBLAS)
+    calls interleave. This extracts just the ``call`` function via ``ast``.
+    """
+    for py_file in sorted(Path(cache_dir).rglob("*.py")):
+        try:
+            text = py_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "def call(" not in text:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "call":
+                segment = ast.get_source_segment(text, node)
+                if segment:
+                    return segment
+    return None
 
 
 def _safe_triton_version() -> str:
@@ -409,6 +467,7 @@ def _safe_triton_version() -> str:
     provenance for the manifest, so a missing import must never abort the
     export.
     """
+    # pylint: disable=import-outside-toplevel, broad-except
     try:
         import triton  # pyright: ignore[reportMissingImports]
 
@@ -431,18 +490,18 @@ def _tensor_meta(name: str, t: Tensor) -> dict:
     }
 
 
-def _spec_io(args, kwargs, signature) -> list[dict]:
+def _spec_io(args, kwargs, sig) -> list[dict]:
     """Build the manifest ``io.inputs`` list for one module's spec.
 
-    Walks the module's forward ``signature`` (skipping ``self``), pairing
+    Walks the module's forward ``sig`` (skipping ``self``), pairing
     positional ``args`` and any non-positional ``kwargs`` with their param
     names. Each tensor found is flattened via
     :func:`plain_tensor_container` and emitted through
     :func:`_tensor_meta`, preserving declaration order so the manifest
-    matches the ONNX function signature exactly.
+    matches the ONNX function sig exactly.
     """
     out: list[dict] = []
-    params = list(signature.parameters.values())[1:]  # skip self
+    params = list(sig.parameters.values())[1:]  # skip self
     # positional args
     for arg, param in zip(args, params):
         out.extend(_tensor_meta(param.name, t) for t in plain_tensor_container(arg))
@@ -485,7 +544,7 @@ def export_hyper_onnx(  # noqa: C901
     dynamo: bool = False,
     external_data: bool = False,
     hiera: Collection[type[Module]] | None = None,
-    compile: Collection[type[Module]] | None = None,
+    compile_hier: Collection[type[Module]] | None = None,
     compile_static_grid: bool = False,
     module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
@@ -520,13 +579,13 @@ def export_hyper_onnx(  # noqa: C901
             the model architecture.
         hiera (Optional[Collection[type[Module]]]): A container of types of module to be
             composed as a onnx function.
-        compile (Optional[Collection[type[Module]]]): A container of module types to
+        compile_hier (Optional[Collection[type[Module]]]): Module types to
             additionally run through ``torch.compile`` and capture as a kernel
-            bundle. ``compile`` is a strict subset of ``hiera``: any type in
-            ``compile`` but not ``hiera`` is auto-promoted. Each captured
+            bundle. ``compile_hier`` is a strict subset of ``hiera``: any type in
+            ``compile_hier`` but not ``hiera`` is auto-promoted. Each captured
             module produces a sibling ``<type_name>.kernels/`` directory next
             to its ONNX function body; deleting that directory yields a model
-            indistinguishable from one exported without ``compile``. Requires
+            indistinguishable from one exported without ``compile_hier``. Requires
             ``external_directory`` (kernels cannot be inlined into the ONNX).
         compile_static_grid (bool): When True, skip grid-AST extraction and
             leave ``launch.grid_expr`` null for every captured kernel. Use for
@@ -548,8 +607,8 @@ def export_hyper_onnx(  # noqa: C901
 
     model_typename = type(model).__name__
     logger = nest(model_typename)
-    if compile:
-        hiera = set(hiera or []) | set(compile)
+    if compile_hier:
+        hiera = set(hiera or []) | set(compile_hier)
     if _:
         ignored_params = "\n  ".join(_.keys())
         logger.warning(f"These arguments are ignored:\n  {ignored_params}")
@@ -615,10 +674,10 @@ def export_hyper_onnx(  # noqa: C901
         logger=logger,
     )
 
-    if compile:
+    if compile_hier:
         _collect_and_attach_kernels(
             model=model,
-            compile=compile,
+            compile_hier=compile_hier,
             module_spec=module_spec,
             external_directory=external_directory,
             compile_static_grid=compile_static_grid,

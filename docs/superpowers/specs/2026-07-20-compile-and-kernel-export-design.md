@@ -97,7 +97,7 @@ export_hyper_onnx(
     (torch.randn(8, 768),),
     "model.onnx",
     hiera=[DecoderLayer, Attention],
-    compile=[Attention],            # Attention gets a kernel bundle
+    compile=[Attention],  # Attention gets a kernel bundle
     dynamo=True,
     external_data=True,
     external_directory="out/",
@@ -169,12 +169,15 @@ by the `_capture_triton_kernels` context manager:
 @contextmanager
 def _capture_triton_kernels():
     import triton.compiler as tc
+
     captured = {"kernels": [], "grids": {}}
     orig_compile = tc.compile
+
     def _spy(src, target=None, options=None, **kw):
         ck = orig_compile(src, target, options, **kw)
         captured["kernels"].append({"kernel": ck, "src": src})
         return ck
+
     tc.compile = _spy
     # (b) Grid capture — patch the inductor wrapper's grid-lambda emitter.
     _install_grid_spy(captured["grids"])
@@ -532,9 +535,7 @@ CUDA-only tests use the existing project convention (no custom plugin).
 Tests that need CUDA get:
 
 ```python
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 ```
 
 Triton availability is implied by CUDA (per `pyproject.toml` the triton

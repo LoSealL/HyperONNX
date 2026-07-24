@@ -5,17 +5,17 @@ with stub metadata + metadata_group. Integration with real triton kernels
 is verified in the Tier 2 integration tests.
 """
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from hyperonnx.compile.capture import (
     CaptureSink,
-    _attach_ast_to_kernel,
-    _binary_ext_for_target,
     _extract_target_from_metadata,
-    _target_to_dict,
+    attach_grid_exprs,
     capture_compiled_kernels,
     extract_grid_value,
 )
@@ -30,8 +30,6 @@ def _write_stub_cubin(tmp: Path) -> dict:
     (notably `target`); in real triton the same metadata dict the listener
     receives is also what gets serialized to that JSON file.
     """
-    import json
-
     cubin_file = tmp / "kernel.cubin"
     cubin_file.write_bytes(b"\x00\x01\x02FAKE")
     json_file = tmp / "kernel.json"
@@ -85,18 +83,16 @@ class _StubCompiledKernel:
 def test_capture_sink_initially_empty():
     sink = CaptureSink()
     assert sink.kernels == []
-    assert sink.grid_sources == {}
+    assert sink.grid_constants == {}
 
 
 def test_listener_records_kernel(tmp_path: Path):
-    import triton.knobs as knobs
-
     metadata_group = _write_stub_cubin(tmp_path)
     metadata = _stub_metadata()
 
-    with capture_compiled_kernels(static_grid=True) as sink:
+    with capture_compiled_kernels() as sink:
         # Simulate triton calling the listener
-        knobs.compilation.listener(
+        triton.knobs.compilation.listener(
             src=_StubSrc(),
             metadata=metadata,
             metadata_group=metadata_group,
@@ -114,29 +110,10 @@ def test_listener_records_kernel(tmp_path: Path):
 
 
 def test_listener_restores_original():
-    import triton.knobs as knobs
-
-    orig = knobs.compilation.listener
-    with capture_compiled_kernels(static_grid=True):
+    orig = triton.knobs.compilation.listener
+    with capture_compiled_kernels():
         pass
-    assert knobs.compilation.listener is orig
-
-
-def test_capture_static_grid_skips_ast(tmp_path: Path):
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=True) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
+    assert triton.knobs.compilation.listener is orig
 
 
 # ---- record() method coverage ----------------------------------------------
@@ -206,25 +183,6 @@ def test_record_from_listener_uses_metadata_name_default():
     assert sink.kernels == []  # construction fails, but name="kernel_0" was used
 
 
-# ---- helper function coverage ----------------------------------------------
-
-
-def test_binary_ext_for_cuda_returns_cubin():
-    assert _binary_ext_for_target(SimpleNamespace(backend="cuda")) == "cubin"
-
-
-def test_binary_ext_for_hip_returns_hsaco():
-    assert _binary_ext_for_target(SimpleNamespace(backend="hip")) == "hsaco"
-
-
-def test_binary_ext_unknown_backend_defaults_to_cubin():
-    assert _binary_ext_for_target(SimpleNamespace(backend="rocm")) == "cubin"
-
-
-def test_binary_ext_for_none_target_defaults_to_cubin():
-    assert _binary_ext_for_target(None) == "cubin"
-
-
 def test_extract_target_from_metadata_dict():
     """Dict target is converted to SimpleNamespace."""
     metadata = {"target": {"backend": "cuda", "arch": "sm_90", "warp_size": 32}}
@@ -247,15 +205,6 @@ def test_extract_target_from_metadata_none_when_absent():
     assert _extract_target_from_metadata({}) is None
 
 
-def test_target_to_dict_with_partial_object():
-    """_target_to_dict uses getattr defaults for missing attrs."""
-    result = _target_to_dict(SimpleNamespace())  # no attrs
-    assert result == {"backend": "cuda", "arch": "sm_70", "warp_size": 32}
-
-
-# ---- extract_grid_value() coverage -----------------------------------------
-
-
 def test_extract_grid_value_from_callable():
     """When lam is callable, it's invoked with meta."""
     lam = lambda meta: (4, 8, 1)  # noqa: E731
@@ -273,126 +222,82 @@ def test_extract_grid_value_returns_none_on_exception():
     assert result is None
 
 
-# ---- _attach_ast_to_kernel() coverage --------------------------------------
+# ---- attach_grid_exprs() coverage -------------------------------------------
 
 
-def test_attach_ast_to_kernel_updates_matching_symbol():
-    """AST is attached to the kernel with matching symbol."""
-    sink = CaptureSink()
-    sink.kernels.append(
+def _wrapper_graph_with(grid_type: str, kernel: str = "k0") -> list[dict]:
+    return [
         {
-            "symbol": "k0",
-            "launch": {"grid_expr": None},
+            "graph": "",
+            "steps": [
+                {"type": "triton_kernel", "kernel": kernel, "grid_type": grid_type}
+            ],
         }
-    )
-    ast = [{"op": "const", "value": 1}]
-    _attach_ast_to_kernel(sink, "k0", ast)
-    assert sink.kernels[0]["launch"]["grid_expr"] is ast
+    ]
 
 
-def test_attach_ast_to_kernel_no_match_is_noop():
-    """When no kernel matches, nothing changes."""
+def _sink_with_kernel(symbol: str = "k0", cfg: dict | None = None) -> CaptureSink:
     sink = CaptureSink()
-    sink.kernels.append(
-        {
-            "symbol": "k0",
-            "launch": {"grid_expr": None},
-        }
-    )
-    _attach_ast_to_kernel(sink, "nonexistent", [{"op": "const", "value": 1}])
+    sink.kernels.append({"symbol": symbol, "launch": {"grid_expr": None}})
+    if cfg is not None:
+        sink.grid_constants[symbol] = cfg
+    return sink
+
+
+def test_attach_grid_exprs_grid1d():
+    sink = _sink_with_kernel(cfg={"XBLOCK": 512})
+    attach_grid_exprs(sink, _wrapper_graph_with("Grid1D"))
+    ast = sink.kernels[0]["launch"]["grid_expr"]
+    assert ast is not None
+    assert ast[0] == {
+        "op": "cdiv",
+        "a": {"op": "meta", "key": "xnumel"},
+        "b": {"op": "const", "value": 512},
+    }
+    assert ast[1] == {"op": "const", "value": 1}
+    assert ast[2] == {"op": "const", "value": 1}
+
+
+def test_attach_grid_exprs_grid2d():
+    sink = _sink_with_kernel(cfg={"XBLOCK": 16, "YBLOCK": 32})
+    attach_grid_exprs(sink, _wrapper_graph_with("Grid2D"))
+    ast = sink.kernels[0]["launch"]["grid_expr"]
+    assert ast is not None
+    assert ast[0]["op"] == "cdiv"
+    assert ast[0]["a"] == {"op": "meta", "key": "xnumel"}
+    assert ast[0]["b"] == {"op": "const", "value": 16}
+    assert ast[1]["a"] == {"op": "meta", "key": "ynumel"}
+    assert ast[1]["b"] == {"op": "const", "value": 32}
+
+
+def test_attach_grid_exprs_no_config_stays_null():
+    """No listener-captured config for the symbol → grid_expr stays None."""
+    sink = _sink_with_kernel(cfg=None)
+    attach_grid_exprs(sink, _wrapper_graph_with("Grid1D"))
     assert sink.kernels[0]["launch"]["grid_expr"] is None
 
 
-# ---- attach_grid_source() coverage -----------------------------------------
+def test_attach_grid_exprs_unknown_grid_type_stays_null():
+    sink = _sink_with_kernel(cfg={"XBLOCK": 512})
+    attach_grid_exprs(sink, _wrapper_graph_with("NoSuchGrid"))
+    assert sink.kernels[0]["launch"]["grid_expr"] is None
 
 
-def test_attach_grid_source_stores_source():
-    sink = CaptureSink()
-    sink.attach_grid_source("k0", "return (1,)")
-    assert sink.grid_sources == {"k0": "return (1,)"}
-
-
-# ---- capture_compiled_kernels() non-static path ----------------------------
-
-
-def test_capture_dynamic_grid_runs_ast_loop_on_no_sources(tmp_path: Path):
-    """With static_grid=False, the post-yield AST loop runs (but is a no-op
-    when grid_sources is empty)."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-    # grid_sources is empty in v1, so grid_expr stays None even with
-    # static_grid=False.
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
-
-
-def test_capture_dynamic_grid_with_untranslatable_source(tmp_path: Path):
-    """When grid_sources has an untranslatable source, AST stays None and
-    the warning is logged."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-        # Populate grid_sources after recording so the post-yield loop has
-        # something to translate. Use an untranslatable expression.
-        sink.grid_sources["stub_kernel_0"] = "return (unknown_func(x),)"
-    # AST extraction failed silently; grid_expr remains None
-    assert all(k["launch"]["grid_expr"] is None for k in sink.kernels)
-
-
-def test_capture_dynamic_grid_with_valid_source(tmp_path: Path):
-    """When grid_sources has a valid cdiv source, AST is attached."""
-    import triton.knobs as knobs
-
-    metadata_group = _write_stub_cubin(tmp_path)
-    metadata = _stub_metadata()
-
-    with capture_compiled_kernels(static_grid=False) as sink:
-        knobs.compilation.listener(
-            src=_StubSrc(),
-            metadata=metadata,
-            metadata_group=metadata_group,
-            times={},
-            cache_hit=False,
-        )
-        sink.grid_sources["stub_kernel_0"] = "return (cdiv(M, 128),)"
-    assert len(sink.kernels) == 1
-    grid_expr = sink.kernels[0]["launch"]["grid_expr"]
-    assert grid_expr is not None
-    assert grid_expr[0]["op"] == "cdiv"
+def test_attach_grid_exprs_prefix_grid_stays_null():
+    """Grid types with prefix assignments (overflow guards) stay null."""
+    sink = _sink_with_kernel(cfg={"XBLOCK": 512, "YBLOCK": 512})
+    attach_grid_exprs(sink, _wrapper_graph_with("Grid2DWithYZOverflow"))
+    assert sink.kernels[0]["launch"]["grid_expr"] is None
 
 
 def test_listener_callback_swallows_record_exceptions(tmp_path: Path):
     """If record_from_listener raises inside _listener, the exception is
     caught (logged) and doesn't propagate to the triton caller."""
-    from unittest.mock import patch
-
-    import triton.knobs as knobs
-
     metadata_group = _write_stub_cubin(tmp_path)
     metadata = _stub_metadata()
 
     with (
-        capture_compiled_kernels(static_grid=True),
+        capture_compiled_kernels(),
         patch.object(
             CaptureSink,
             "record_from_listener",
@@ -400,7 +305,7 @@ def test_listener_callback_swallows_record_exceptions(tmp_path: Path):
         ),
     ):
         # Must not raise
-        knobs.compilation.listener(
+        triton.knobs.compilation.listener(
             src=_StubSrc(),
             metadata=metadata,
             metadata_group=metadata_group,

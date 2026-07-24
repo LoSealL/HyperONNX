@@ -68,6 +68,23 @@ def _translate_expr(node: pyast.AST) -> dict:
             "a": _translate_expr(node.left),
             "b": _translate_expr(node.right),
         }
+    if isinstance(node, pyast.UnaryOp) and isinstance(node.op, pyast.USub):
+        inner = node.operand
+        # Inductor's python-mode ceildiv trick: -((a) // -(b)) == cdiv(a, b).
+        if (
+            isinstance(inner, pyast.BinOp)
+            and isinstance(inner.op, pyast.FloorDiv)
+            and isinstance(inner.right, pyast.UnaryOp)
+            and isinstance(inner.right.op, pyast.USub)
+        ):
+            return {
+                "op": "cdiv",
+                "a": _translate_expr(inner.left),
+                "b": _translate_expr(inner.right.operand),
+            }
+        if isinstance(inner, pyast.Constant) and isinstance(inner.value, int):
+            return {"op": "const", "value": -inner.value}
+        raise NotTranslatable(f"unsupported unary: {pyast.dump(node)}")
     if isinstance(node, pyast.Subscript):
         if isinstance(node.value, pyast.Attribute) and node.value.attr in (
             "shape",

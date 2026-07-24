@@ -390,13 +390,11 @@ class ModuleReturnList(torch.nn.Module):
     def __init__(self, return_as_tuple=False):
         super().__init__()
         self.mlist = torch.nn.ModuleList()
-        self.mlist.extend(
-            [
-                torch.nn.Linear(8, 8),
-                torch.nn.Linear(8, 8),
-                torch.nn.Linear(8, 8),
-            ]
-        )
+        self.mlist.extend([
+            torch.nn.Linear(8, 8),
+            torch.nn.Linear(8, 8),
+            torch.nn.Linear(8, 8),
+        ])
         self.return_as_tuple = return_as_tuple
 
     def forward(self, x):

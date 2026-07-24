@@ -544,65 +544,61 @@ def test_compose_nodes_to_functions_complex_cycle_scenario():
     )
 
     # Add functions with complex internal structures
-    model.functions.extend(
-        [
-            make_function(
-                "hyper",
-                "proc1",
-                ["x"],
-                ["y"],
-                nodes=[
-                    make_node(
-                        "Constant",
-                        [],
-                        ["shape1"],
-                        name="shape_const1",
-                        value=onnx.helper.make_tensor(
-                            name="shape1_value",
-                            data_type=onnx.TensorProto.INT64,
-                            dims=[1],
-                            vals=[-1],
-                        ),
+    model.functions.extend([
+        make_function(
+            "hyper",
+            "proc1",
+            ["x"],
+            ["y"],
+            nodes=[
+                make_node(
+                    "Constant",
+                    [],
+                    ["shape1"],
+                    name="shape_const1",
+                    value=onnx.helper.make_tensor(
+                        name="shape1_value",
+                        data_type=onnx.TensorProto.INT64,
+                        dims=[1],
+                        vals=[-1],
                     ),
-                    make_node("Reshape", ["x", "shape1"], ["r2"], name="proc1_reshape"),
-                    make_node("Relu", ["r2"], ["r3"], name="proc1_relu"),
-                    make_node(
-                        "Constant",
-                        [],
-                        ["shape2"],
-                        name="shape_const2",
-                        value=onnx.helper.make_tensor(
-                            name="shape2_value",
-                            data_type=onnx.TensorProto.INT64,
-                            dims=[3],
-                            vals=[1, 2, 3],
-                        ),
+                ),
+                make_node("Reshape", ["x", "shape1"], ["r2"], name="proc1_reshape"),
+                make_node("Relu", ["r2"], ["r3"], name="proc1_relu"),
+                make_node(
+                    "Constant",
+                    [],
+                    ["shape2"],
+                    name="shape_const2",
+                    value=onnx.helper.make_tensor(
+                        name="shape2_value",
+                        data_type=onnx.TensorProto.INT64,
+                        dims=[3],
+                        vals=[1, 2, 3],
                     ),
-                    make_node(
-                        "Reshape", ["r3", "shape2"], ["y"], name="proc1_reshape2"
-                    ),
-                ],
-                opset_imports=[
-                    make_operatorsetid("hyper", 1),
-                    ONNXIFIER_OPSET,
-                ],
-            ),
-            make_function(
-                "hyper",
-                "proc2",
-                ["x"],
-                ["y"],
-                nodes=[
-                    make_node("Abs", ["x"], ["a1"], name="proc2_abs"),
-                    make_node("Sin", ["a1"], ["y"], name="proc2_sin"),
-                ],
-                opset_imports=[
-                    make_operatorsetid("hyper", 1),
-                    ONNXIFIER_OPSET,
-                ],
-            ),
-        ]
-    )
+                ),
+                make_node("Reshape", ["r3", "shape2"], ["y"], name="proc1_reshape2"),
+            ],
+            opset_imports=[
+                make_operatorsetid("hyper", 1),
+                ONNXIFIER_OPSET,
+            ],
+        ),
+        make_function(
+            "hyper",
+            "proc2",
+            ["x"],
+            ["y"],
+            nodes=[
+                make_node("Abs", ["x"], ["a1"], name="proc2_abs"),
+                make_node("Sin", ["a1"], ["y"], name="proc2_sin"),
+            ],
+            opset_imports=[
+                make_operatorsetid("hyper", 1),
+                ONNXIFIER_OPSET,
+            ],
+        ),
+    ])
 
     onnx.checker.check_model(model)
 

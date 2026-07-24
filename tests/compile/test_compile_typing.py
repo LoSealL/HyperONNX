@@ -25,6 +25,6 @@ from hyperonnx.compile.typing import (
 def test_typeddicts_are_importable():
     assert "cubin_bytes" in CompiledKernelInfo.__annotations__
     assert "grid_expr" in LaunchDescriptor.__annotations__
-    assert "kernels" in KernelBundleManifest.__annotations__
+    assert "pipeline" in KernelBundleManifest.__annotations__
     assert "args" in CompiledKernelInfo.__annotations__
     assert "kind" in KernelArgDescriptor.__annotations__

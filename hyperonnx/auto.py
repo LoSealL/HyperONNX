@@ -94,7 +94,7 @@ class AutoTraceMethod(Module):
         dynamo: bool = False,
         external_data: bool = False,
         hiera: Collection[type[Module]] | None = None,
-        compile: Collection[type[Module]] | None = None,
+        compile_hier: Collection[type[Module]] | None = None,
         compile_static_grid: bool = False,
         module_spec: dict[Module, ModuleSpec] | None = None,
         do_optimization: bool = True,
@@ -104,8 +104,8 @@ class AutoTraceMethod(Module):
 
         Forwards every argument verbatim to
         :func:`hyperonnx.hyper_export.export_hyper_onnx`; see that function's
-        docstring for the full semantics of ``hiera``, ``compile`` and
-        ``compile_static_grid``. ``compile`` requires ``external_directory``
+        docstring for the full semantics of ``hiera``, ``compile_hier`` and
+        ``compile_static_grid``. ``compile_hier`` requires ``external_directory``
         (or :func:`export_hyper_onnx` will skip kernel capture with a
         warning).
 
@@ -152,7 +152,7 @@ class AutoTraceMethod(Module):
                     dynamo=dynamo,
                     external_data=external_data,
                     hiera=hiera,
-                    compile=compile,
+                    compile_hier=compile_hier,
                     compile_static_grid=compile_static_grid,
                     module_spec=module_spec,
                     do_optimization=do_optimization,

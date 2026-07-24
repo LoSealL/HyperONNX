@@ -67,6 +67,7 @@ tests/
 ```python
 # tests/expoter/test_compile_typing.py
 """Typing smoke tests for the compile package."""
+
 from hyperonnx.compile.typing import (
     CompiledKernelInfo,
     GridLiteral,
@@ -118,6 +119,7 @@ limitations under the License.
 Licensed under the Apache License, Version 2.0 (the "License");
 ... [same header as above]
 """
+
 from typing import NotRequired, TypedDict
 
 
@@ -213,6 +215,7 @@ Signed-off-by: AGENTS <claude>"
 ```python
 # tests/expoter/test_compile_grid_ast.py
 """Unit tests for grid AST translation and evaluation."""
+
 import pytest
 
 from hyperonnx.compile.grid_ast import (
@@ -292,6 +295,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'hyperonnx.compile.gri
 Licensed under the Apache License, Version 2.0 (the "License");
 ... [same header]
 """
+
 import ast as pyast
 from collections.abc import Mapping
 
@@ -336,7 +340,10 @@ def _translate_expr(node: pyast.AST) -> dict:
         }
     if isinstance(node, pyast.Subscript):
         # Match x.shape[N] or x.size(N)
-        if isinstance(node.value, pyast.Attribute) and node.value.attr in ("shape", "size"):
+        if isinstance(node.value, pyast.Attribute) and node.value.attr in (
+            "shape",
+            "size",
+        ):
             base = node.value.value
             if not isinstance(base, pyast.Name):
                 raise NotTranslatable("shape base not Name")
@@ -444,6 +451,7 @@ These tests monkey-patch triton.compiler.compile with a stub so the hook
 logic can be tested without a real GPU. Integration with real triton
 kernels is verified in the Tier 2 integration tests.
 """
+
 from unittest.mock import MagicMock
 
 from hyperonnx.compile.capture import CaptureSink, capture_compiled_kernels
@@ -532,6 +540,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'hyperonnx.compile.cap
 Licensed under the Apache License, Version 2.0 (the "License");
 ... [same header]
 """
+
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -703,6 +712,7 @@ Signed-off-by: AGENTS <claude>"
 ```python
 # tests/expoter/test_compile_bundle.py
 """Unit tests for the bundle writer."""
+
 import json
 from pathlib import Path
 
@@ -733,12 +743,16 @@ def test_write_bundle_creates_dir_and_files(tmp_path: Path):
         directory=tmp_path,
         type_name="Attention:0",
         kernels=kernels,
-        io={"inputs": [{"name": "x", "dtype": "float16", "shape": [1, 8]}],
-            "outputs": []},
-        module_meta={"type_name": "Attention:0",
-                     "python_class": "M.Attention",
-                     "torch_version": "2.10.0",
-                     "triton_version": "3.5.0"},
+        io={
+            "inputs": [{"name": "x", "dtype": "float16", "shape": [1, 8]}],
+            "outputs": [],
+        },
+        module_meta={
+            "type_name": "Attention:0",
+            "python_class": "M.Attention",
+            "torch_version": "2.10.0",
+            "triton_version": "3.5.0",
+        },
     )
     assert out == tmp_path / "Attention:0.kernels"
     assert out.is_dir()
@@ -753,8 +767,12 @@ def test_manifest_is_well_formed(tmp_path: Path):
         type_name="A",
         kernels=[_fake_kernel("k0")],
         io={"inputs": [], "outputs": []},
-        module_meta={"type_name": "A", "python_class": "X",
-                     "torch_version": "1", "triton_version": "1"},
+        module_meta={
+            "type_name": "A",
+            "python_class": "X",
+            "torch_version": "1",
+            "triton_version": "1",
+        },
     )
     data = json.loads((out / "manifest.json").read_text())
     assert data["schema_version"] == 1
@@ -770,8 +788,12 @@ def test_bundle_dir_is_legalized_for_unsafe_chars(tmp_path: Path):
         type_name="A/B:0",
         kernels=[],
         io={"inputs": [], "outputs": []},
-        module_meta={"type_name": "A/B:0", "python_class": "X",
-                     "torch_version": "1", "triton_version": "1"},
+        module_meta={
+            "type_name": "A/B:0",
+            "python_class": "X",
+            "torch_version": "1",
+            "triton_version": "1",
+        },
     )
     assert out.exists()
 
@@ -784,8 +806,12 @@ def test_grid_expr_serializes_when_present(tmp_path: Path):
         type_name="A",
         kernels=[k],
         io={"inputs": [], "outputs": []},
-        module_meta={"type_name": "A", "python_class": "X",
-                     "torch_version": "1", "triton_version": "1"},
+        module_meta={
+            "type_name": "A",
+            "python_class": "X",
+            "torch_version": "1",
+            "triton_version": "1",
+        },
     )
     data = json.loads((out / "manifest.json").read_text())
     assert data["kernels"][0]["launch"]["grid_expr"] == [{"op": "const", "value": 1}]
@@ -805,6 +831,7 @@ Expected: FAIL with `ModuleNotFoundError`.
 Licensed under the Apache License, Version 2.0 (the "License");
 ... [same header]
 """
+
 import json
 from pathlib import Path
 
@@ -914,15 +941,14 @@ Signed-off-by: AGENTS <claude>"
 
 These require a real CUDA device + triton. Skipped otherwise.
 """
+
 import json
 from pathlib import Path
 
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
 class _Compiled(torch.nn.Module):
@@ -1191,6 +1217,7 @@ def _collect_and_attach_kernels(
 def _safe_triton_version() -> str:
     try:
         import triton
+
         return triton.__version__
     except Exception:
         return "unknown"
@@ -1252,8 +1279,8 @@ Open `hyperonnx/auto.py`. Extend the `export` method signature and forward the a
 And in the `export_hyper_onnx(...)` call inside `export`, add:
 
 ```python
-                compile=compile,
-                compile_static_grid=compile_static_grid,
+compile = (compile,)
+compile_static_grid = (compile_static_grid,)
 ```
 
 - [ ] **Step 6: Run integration tests**

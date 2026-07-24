@@ -18,7 +18,7 @@ Shared TypedDicts for the compile / kernel-bundle subsystem.
 These structures are the in-memory mirror of the JSON manifest that ships next
 to each compiled ONNX function (see ``bundle.write_kernel_bundle`` and the
 ``Kernel bundle manifest schema`` section of the compile-and-kernel-export
-design doc). They are intentionally plain ``TypedDict``\s rather than dataclasses
+design doc). They are intentionally plain ``TypedDict``\\s rather than dataclasses
 so that ``json.dumps``/``json.loads`` round-trips require no adapter layer.
 """
 
@@ -58,16 +58,33 @@ class KernelArgDescriptor(TypedDict):
 
     A C/C++/Rust runtime reads ``args[i]`` to know how to push kernel
     arguments via the CUDA Driver API. The ``kind`` discriminates the union:
-    ``"tensor"`` arguments carry ``elem_offset``; ``"scalar`` arguments
+    ``"tensor"`` arguments carry ``buffer_id`` (v1 launch-trace path) or
+    ``elem_offset`` (v1.1 inductor-wrapper path); ``"scalar`` arguments
     either carry a literal ``value`` (compile-time constant) or a ``from_``
     descriptor (derived from an input's shape or another arg).
+
+    Only ``kind`` is always present; the rest are ``NotRequired`` because the
+    v1 launch trace emits minimal dicts (e.g. ``{"kind": "tensor",
+    "buffer_id": n}``) and enriches them in later versions.
     """
 
-    kind: str  # "tensor" | "scalar"
-    name: str
-    dtype: str
-    elem_offset: NotRequired[int]
-    value: NotRequired[int]
+    kind: str  # "tensor" | "scalar" | "literal"
+    name: NotRequired[str]
+    """Static buffer symbol (e.g. ``"buf0"`` / ``"arg0_1"``) from the
+    wrapper codegen — the name half of the symbol↔index correspondence;
+    ``buffer_id`` is the index half."""
+    dtype: NotRequired[str]
+    buffer_id: NotRequired[int]  # v1 launch-trace: device buffer id
+    direction: NotRequired[str]  # "out" for write-back pointers (out_ptr*)
+    shape: NotRequired[list[int]]
+    """This arg's logical shape at its own launch — one pointer can host
+    different views over time, so per-arg layout beats the registry's."""
+    stride: NotRequired[list[int]]
+    elem_offset: NotRequired[int]  # v1.1: per-slot element offset
+    value: NotRequired[int | float | list | str]
+    expr: NotRequired[str]
+    """Original wrapper expression when the arg is a compound expression;
+    ``name`` then holds the base buffer symbol."""
     from_: NotRequired[dict]  # serialized with key "from"
 
 
@@ -100,6 +117,17 @@ class CompiledKernelInfo(TypedDict):
     device_target: GPUTarget
     launch: LaunchDescriptor
     args: list[KernelArgDescriptor]
+    src_hash: NotRequired[str]
+    """Triton's full cache-key hash (``metadata["hash"]``), identifying the
+    exact compiled variant. Autotune may compile several variants of one
+    symbol; the launch trace records the winner's hash and the bundle
+    filters losers by it."""
+    ttir: NotRequired[str]
+    """Triton IR (TTIR) text — the high-level kernel representation before
+    GPU-specific lowering. Absent when the backend provides no IR."""
+    ttgir: NotRequired[str]
+    """Triton GPU IR (TTGIR) text — the GPU-specific lowered representation
+    (blocks, warps, shared memory). Absent when the backend provides no IR."""
 
 
 class KernelEntry(TypedDict):
@@ -119,16 +147,62 @@ class KernelEntry(TypedDict):
     variants: list
 
 
-class KernelBundleManifest(TypedDict):
-    """Top-level manifest.json schema.
+class BufferEntry(TypedDict):
+    """One device buffer used by the kernel sequence.
 
-    ``module`` and ``io`` are kept loosely typed (``dict``) because their
-    internal structure is small, stable, and documented in the design doc;
-    tightening them to TypedDicts would buy little and force churn on every
-    provenance field addition.
+    ``kind`` discriminates: ``input`` (user-provided at replay),
+    ``parameter`` (loaded from ``file``), ``intermediate`` (zeroed),
+    ``output`` (produced by the kernel sequence).
+    """
+
+    id: int
+    kind: str
+    dtype: str
+    shape: list[int]
+    stride: NotRequired[list[int]]
+    """Memory layout at capture time (element strides). Compiled kernels
+    bake this layout into their indexing, so replay must allocate with
+    the same strides (e.g. channels_last conv activations)."""
+    name: NotRequired[str]
+    file: NotRequired[str]
+
+
+class KernelBundleManifest(TypedDict):
+    """Top-level manifest.json schema (v2).
+
+    v2 merged the old top-level ``kernels`` list into ``pipeline``: each
+    ``triton_kernel`` step inlines the kernel launch payload (``cubin``,
+    ``device_target``, ``launch``, runtime ``args``). The old
+    ``vendor_lib`` key was dropped — vendor calls are the pipeline's
+    ``extern_kernel`` steps. ``module`` and ``io`` are kept loosely typed
+    (``dict``) because their internal structure is small, stable, and
+    documented in the design doc; tightening them to TypedDicts would buy
+    little and force churn on every provenance field addition.
     """
 
     schema_version: int
     module: dict
     io: dict
-    kernels: list[KernelEntry]
+    pipeline: list[dict]
+    """The execution pipeline, one entry per codegened graph:
+    ``{"graph": name, "buffers": {...}, "steps": [...]}``. Always present.
+
+    ``buffers`` is the definition table for every buffer name the steps
+    reference — graph inputs (``kind="input"``), allocations
+    (``kind="allocate"``, with shape/stride/dtype) and storage aliases
+    (``alias_of``); entries are cross-validated against ``buffers[]`` and
+    carry ``buffer_id`` on match. Allocator reuse can map one name to
+    different runtime ids across steps; the per-step ``args`` ids stay
+    authoritative.
+    ``steps`` are execution-ordered and noise-free
+    (asserts/guards/comments/frees stripped): ``allocate``,
+    ``triton_kernel`` (kernel launch payload inlined),
+    ``extern_kernel`` (vendor-library calls), and ``as_strided``
+    (hoisted ``reinterpret_tensor`` layout transforms). Both kernel step
+    kinds share one schema: ``args`` as :class:`KernelArgDescriptor`\\s
+    — tensor args carry both ``name`` (static buffer symbol) and
+    ``buffer_id`` (runtime index) — plus ``output`` of the same shape.
+    Captured from ``PythonWrapperCodegen.lines`` before stringification
+    by ``capture_wrapper_lines`` — no source parsing involved.
+    """
+    buffers: NotRequired[list[BufferEntry]]

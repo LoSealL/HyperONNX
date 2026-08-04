@@ -3,7 +3,12 @@
 import json
 from pathlib import Path
 
-from hyperonnx.compile.bundle import _finalize_pipeline, write_kernel_bundle
+from hyperonnx.compile.bundle import (
+    _finalize_pipeline,
+    _layout_span,
+    _reconcile_registry_with_allocate,
+    write_kernel_bundle,
+)
 from hyperonnx.compile.capture import BufferInfo, LaunchTraceEntry, LaunchTraceSink
 from hyperonnx.compile.typing import CompiledKernelInfo
 
@@ -352,3 +357,254 @@ def test_autotune_loser_variants_are_dropped(tmp_path: Path):
     assert len(steps) == 1
     assert steps[0]["kernel"] == "k0"
     assert len(list(out.glob("*.cubin"))) == 1
+
+
+# ---- _reconcile_registry_with_allocate() coverage --------------------------
+
+
+def test_layout_span_basic():
+    assert _layout_span([2, 3], [3, 1]) == 6
+    assert _layout_span(["2", "3"], ["3", "1"]) == 6  # str entries OK
+    assert _layout_span([1, 240, 258], [61920, 258, 1]) == 61920
+    assert _layout_span([2, 4], [4, 1, 1]) is None  # mismatched lengths
+
+
+def test_reconcile_grows_registry_to_allocate_span():
+    """The view-before-allocate bug: registry froze [1,240,258] (the view a
+    kernel saw), but the graph-table allocate says [2,240,258]. Reconcile
+    grows the registry so replay allocates enough storage."""
+    registry = [
+        {
+            "id": 38,
+            "kind": "intermediate",
+            "dtype": "float32",
+            "shape": [1, 240, 258],
+            "stride": [61920, 258, 1],
+        },
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf35": {
+                    "kind": "allocate",
+                    "shape": ["2", "240", "258"],
+                    "stride": ["61920", "258", "1"],
+                    "dtype": "float32",
+                    "buffer_id": 38,
+                }
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    assert registry[0]["shape"] == [2, 240, 258]
+    assert registry[0]["stride"] == [61920, 258, 1]
+
+
+def test_reconcile_leaves_registry_unchanged_when_already_large():
+    """When the registry span already covers the allocate, nothing changes."""
+    registry = [
+        {
+            "id": 0,
+            "kind": "intermediate",
+            "dtype": "float32",
+            "shape": [2, 240, 258],
+            "stride": [61920, 258, 1],
+        },
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf0": {
+                    "kind": "allocate",
+                    "shape": ["2", "240", "258"],
+                    "stride": ["61920", "258", "1"],
+                    "buffer_id": 0,
+                }
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    assert registry[0]["shape"] == [2, 240, 258]  # unchanged
+
+
+def test_reconcile_skips_allocate_without_buffer_id():
+    """An allocate whose buffer_id never resolved (no launch match) is left
+    alone — the registry cannot be corrected without the id link."""
+    registry = [
+        {"id": 5, "kind": "intermediate", "dtype": "float32", "shape": [1, 4]},
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf0": {
+                    "kind": "allocate",
+                    "shape": ["2", "4"],
+                    "stride": ["4", "1"],
+                    # no buffer_id
+                }
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    assert registry[0]["shape"] == [1, 4]  # unchanged
+
+
+def test_reconcile_drops_stale_stride_when_lengths_differ():
+    """When the allocate has no stride (or a different rank) the stale
+    registry stride is dropped so replay falls back to a contiguous view
+    of the new, larger shape."""
+    registry = [
+        {
+            "id": 1,
+            "kind": "intermediate",
+            "dtype": "float32",
+            "shape": [4],
+            "stride": [1],
+        },
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf1": {
+                    "kind": "allocate",
+                    "shape": ["2", "4"],
+                    "dtype": "float32",
+                    "buffer_id": 1,
+                    # no stride
+                }
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    assert registry[0]["shape"] == [2, 4]
+    assert "stride" not in registry[0]
+
+
+def test_reconcile_through_full_write_kernel_bundle(tmp_path: Path):
+    """End-to-end: write_kernel_bundle must reconcile the registry against
+    the pipeline's allocate entry when the launch trace froze a too-small
+    shape (the actual view-before-allocate bug scenario).
+
+    Setup mirrors the real bug: buf35 is allocated at [2,240,258] but the
+    only kernel that touches it sees a [1,240,258] view, so the launch trace
+    freezes id=0 at [1,240,258]. The allocate's buffer_id is seeded onto
+    the table via the kernel's static-arg → trace-id link, so reconcile can
+    then grow the registry.
+    """
+    k = _fake_kernel("k0")
+    k["args"] = [
+        {
+            "kind": "tensor",
+            "buffer_id": 0,
+            "direction": "out",
+            "shape": [1, 240, 258],
+            "stride": [61920, 258, 1],
+        },
+        {"kind": "scalar", "dtype": "int32", "value": 61920},
+    ]
+    trace = LaunchTraceSink()
+    trace.entries = [
+        LaunchTraceEntry(
+            symbol="k0",
+            grid=(1, 1, 1),
+            shared_mem=2048,
+            num_warps=4,
+            args=k["args"],
+        )
+    ]
+    # Launch trace freezes buffer 0 at the half-size view shape [1,240,258].
+    trace.get_or_create_buffer(0x26000, "float32", (1, 240, 258), (61920, 258, 1))
+    # Graph-table allocate says the true size is [2,240,258]; the kernel's
+    # static arg names buf35, which links the allocate to trace buffer 0.
+    wrapper_graph = [
+        {
+            "graph": "",
+            "buffers": {},
+            "steps": [
+                {
+                    "type": "allocate",
+                    "buffer": "buf35",
+                    "comm_buffer": False,
+                    "shape": ["2", "240", "258"],
+                    "stride": ["61920", "258", "1"],
+                    "dtype": "float32",
+                },
+                {
+                    "type": "triton_kernel",
+                    "kernel": "k0",
+                    "args": ["buf35", "61920"],
+                    "grid_type": "Grid1D",
+                },
+            ],
+        }
+    ]
+    out = write_kernel_bundle(
+        directory=tmp_path,
+        type_name="A",
+        kernels=[k],
+        module_io={"inputs": [], "outputs": []},
+        module_meta={
+            "type_name": "A",
+            "python_class": "X",
+            "torch_version": "1",
+            "triton_version": "1",
+        },
+        launch_trace=trace,
+        wrapper_graph=wrapper_graph,
+    )
+    data = json.loads((out / "manifest.json").read_text())
+    buf0 = next(b for b in data["buffers"] if b["id"] == 0)
+    assert buf0["shape"] == [2, 240, 258]
+    assert buf0["stride"] == [61920, 258, 1]
+
+
+def test_reconcile_dtype_mismatch():
+    """_reconcile_registry_with_allocate must also fix dtype conflicts.
+
+    When inductor's memory planner reuses the same storage for temporaries
+    of different dtypes (e.g. an int64 index buffer followed by a float32
+    intermediate), the launch trace freezes the first-seen dtype (int64)
+    while the graph-table allocate records the true dtype (float32).
+    Reconcile should adopt the allocate's dtype so replay allocates the
+    correct storage type.
+
+    Reproduces the structure of MatchAttentionLayer_705 buffer_id=29:
+    registry dtype=int64 [2,3840,32] vs allocate dtype=float32 [2,3840,32].
+    """
+    registry = [
+        {
+            "id": 29,
+            "kind": "intermediate",
+            "dtype": "int64",
+            "shape": [2, 3840, 32],
+            "stride": [122880, 32, 1],
+        },
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf42": {
+                    "kind": "allocate",
+                    "shape": ["2", "3840", "32"],
+                    "stride": ["122880", "32", "1"],
+                    "dtype": "float32",
+                    "buffer_id": 29,
+                }
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    # Shape/span already matches, but dtype must be corrected.
+    assert registry[0]["dtype"] == "float32", (
+        "registry dtype should be reconciled to the allocate's float32"
+    )

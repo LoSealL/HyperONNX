@@ -14,7 +14,9 @@ import pytest
 
 from hyperonnx.compile.capture import (
     CaptureSink,
+    LaunchTraceSink,
     _extract_target_from_metadata,
+    _storage_span,
     attach_grid_exprs,
     capture_compiled_kernels,
     extract_grid_value,
@@ -312,3 +314,69 @@ def test_listener_callback_swallows_record_exceptions(tmp_path: Path):
             times={},
             cache_hit=False,
         )
+
+
+# ---- _storage_span() + get_or_create_buffer grow-on-resight -----------------
+
+
+def test_storage_span_contiguous_fallback():
+    """Empty stride falls back to prod(shape)."""
+    assert _storage_span((), ()) == 0
+    assert _storage_span((2, 3), ()) == 6
+    assert _storage_span((2, 240, 258), ()) == 2 * 240 * 258
+
+
+def test_storage_span_with_stride():
+    """Explicit stride uses the last-element-offset formula."""
+    # contiguous layout
+    assert _storage_span((2, 3), (3, 1)) == 6
+    # the bug scenario: [1,240,258] contiguous = 61920
+    assert _storage_span((1, 240, 258), (61920, 258, 1)) == 61920
+    # full [2,240,258] contiguous = 123840
+    assert _storage_span((2, 240, 258), (61920, 258, 1)) == 123839 + 1
+
+
+def test_get_or_create_buffer_freezes_on_first_sight():
+    """A brand-new pointer is registered with its first-seen layout."""
+    sink = LaunchTraceSink()
+    bid = sink.get_or_create_buffer(0x1000, "float32", (1, 240, 258), (61920, 258, 1))
+    assert bid == 0
+    buf = sink.buffers[0]
+    assert buf.shape == (1, 240, 258)
+    assert buf.stride == (61920, 258, 1)
+
+
+def test_get_or_create_buffer_grows_on_larger_resight():
+    """Re-sighting a pointer with a larger span grows the recorded layout.
+
+    This covers the case where the full allocation appears as a kernel arg
+    after an earlier smaller view was already registered.
+    """
+    sink = LaunchTraceSink()
+    small = (1, 240, 258)
+    sink.get_or_create_buffer(0x1000, "float32", small, (61920, 258, 1))
+    big = (2, 240, 258)
+    sink.get_or_create_buffer(0x1000, "float32", big, (61920, 258, 1))
+    buf = sink.buffers[0]
+    assert buf.shape == big
+    assert buf.stride == (61920, 258, 1)
+
+
+def test_get_or_create_buffer_ignores_smaller_resight():
+    """A re-sight with a smaller span does not shrink the recorded layout."""
+    sink = LaunchTraceSink()
+    big = (2, 240, 258)
+    sink.get_or_create_buffer(0x1000, "float32", big, (61920, 258, 1))
+    small = (1, 240, 258)
+    sink.get_or_create_buffer(0x1000, "float32", small, (61920, 258, 1))
+    buf = sink.buffers[0]
+    assert buf.shape == big  # unchanged
+
+
+def test_get_or_create_buffer_no_duplicate_buffer_entry():
+    """Re-sighting never creates a second buffer — same id returned."""
+    sink = LaunchTraceSink()
+    bid0 = sink.get_or_create_buffer(0x1000, "float32", (1, 4), (4, 1))
+    bid1 = sink.get_or_create_buffer(0x1000, "float32", (2, 4), (4, 1))
+    assert bid0 == bid1
+    assert len(sink.buffers) == 1

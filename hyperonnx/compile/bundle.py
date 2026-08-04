@@ -94,6 +94,45 @@ def _shape_ints(meta: dict) -> tuple[int, ...] | None:
     return tuple(out)
 
 
+def _layout_span(shape: list, stride: list) -> int | None:
+    """Storage span of a ``(shape, stride)`` layout, in elements.
+
+    ``None`` when shape/stride are symbolic or mismatched. Accepts str
+    or int entries (allocate-table shapes arrive as strings from
+    ``_serialize_buffer``).
+    """
+    if len(shape) != len(stride):
+        return None
+    try:
+        return sum((int(s) - 1) * int(st) for s, st in zip(shape, stride)) + 1
+    except (TypeError, ValueError):
+        return None
+
+
+def _contiguous_span(shape: list) -> int:
+    """Element count of a contiguous tensor of this shape (>= 1)."""
+    n = 1
+    try:
+        for s in shape:
+            n *= int(s)
+    except (TypeError, ValueError):
+        return 0
+    return max(1, n)
+
+
+def _registry_span(entry: BufferEntry) -> int:
+    """Storage span a registry ``BufferEntry`` demands at replay."""
+    shape = entry.get("shape")
+    if not shape:
+        return 0
+    stride = entry.get("stride")
+    if stride and len(stride) == len(shape):
+        span = _layout_span(shape, stride)
+        if span is not None:
+            return span
+    return _contiguous_span(shape)
+
+
 def _static_arg_descriptor(arg: Any, table: dict[str, dict], owner: str) -> dict:
     """Build a unified ``KernelArgDescriptor`` from a static wrapper arg.
 
@@ -534,6 +573,67 @@ def _step_from_entry(entry: KernelEntry) -> dict:
     return step
 
 
+def _reconcile_registry_with_allocate(
+    registry: list[BufferEntry],
+    pipeline: list[dict],
+) -> None:
+    """Grow registry buffer spans to cover graph-table allocations.
+
+    The launch trace freezes a buffer's shape/stride on first sight
+    (:meth:`LaunchTraceSink.get_or_create_buffer`). When inductor splits a
+    full-size allocation into per-batch views that are *consumed by kernels
+    before* the full tensor ever appears as a launch arg, the trace only
+    ever observes the half-size view — so ``manifest["buffers"][i]`` records
+    a too-small shape. The full-size ``[2,…]`` shape exists only in the
+    graph-table ``allocate`` entry (from inductor IR ``buf.get_size()``).
+
+    For every graph-table entry with ``kind=="allocate"`` and a resolved
+    ``buffer_id``, compute the allocate's storage span; if the registry
+    entry for that id has a smaller span, overwrite it with the allocate's
+    shape/stride (and contiguous fallback) so replay allocates enough
+    storage for the views the kernels take.
+
+    This is the only position with full information: launch-trace-side
+    capture cannot observe allocations that never appear as kernel args.
+    Mutates ``registry`` in place.
+    """
+    by_id: dict[int, BufferEntry] = {b["id"]: b for b in registry}
+    for graph in pipeline:
+        table = graph.get("buffers", {})
+        for meta in table.values():
+            if meta.get("kind") != "allocate":
+                continue
+            bid = meta.get("buffer_id")
+            if bid is None:
+                continue
+            entry = by_id.get(bid)
+            if entry is None:
+                continue
+            alloc_shape = meta.get("shape")
+            if not alloc_shape:
+                continue
+            alloc_dtype = meta.get("dtype")
+            if alloc_dtype and entry.get("dtype") != alloc_dtype:
+                entry["dtype"] = alloc_dtype
+            alloc_stride = meta.get("stride")
+            alloc_span: int
+            if alloc_stride and len(alloc_stride) == len(alloc_shape):
+                s = _layout_span(alloc_shape, alloc_stride)
+                alloc_span = s if s is not None else _contiguous_span(alloc_shape)
+            else:
+                alloc_span = _contiguous_span(alloc_shape)
+            if alloc_span <= _registry_span(entry):
+                continue
+            # Overwrite: registry must hold at least the allocate span.
+            entry["shape"] = [int(x) for x in alloc_shape]
+            if alloc_stride and len(alloc_stride) == len(alloc_shape):
+                entry["stride"] = [int(x) for x in alloc_stride]
+            elif "stride" in entry:
+                # Old stride was for a smaller shape; drop it so replay
+                # falls back to a contiguous view of the new shape.
+                del entry["stride"]
+
+
 def write_kernel_bundle(
     directory: Path,
     type_name: str,
@@ -681,6 +781,14 @@ def write_kernel_bundle(
                 "steps": [_step_from_entry(e) for e in entries],
             }
         ]
+
+    # Reconcile the registry against graph-table allocations: the launch
+    # trace freezes shapes on first sight, which is too small when kernels
+    # only ever see per-batch views of a larger allocation. The graph-table
+    # allocate entry carries the true full-size shape from inductor IR.
+    registry = manifest.get("buffers")
+    if registry and manifest["pipeline"]:
+        _reconcile_registry_with_allocate(registry, manifest["pipeline"])
 
     if wrapper_text:
         (bundle_dir / "source_debug.py").write_text(wrapper_text, encoding="utf-8")

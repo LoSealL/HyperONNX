@@ -180,6 +180,29 @@ def replay(
     modules: dict[str, Any] = {}
     name_tensors: dict[str, Any] = {}
 
+    def _resolve_base(
+        name: str | None, table: dict, bid: int | None
+    ) -> tuple[int | None, int]:
+        """Follow ``view_of`` links to the base allocation, accumulating offset.
+
+        Reinterpret views get a distinct runtime id (pointer dedup hands
+        non-zero-offset views their own id); the launch-trace buffer_id is
+        the view's id, not the storage the data lives in. Reads
+        (``tensor_for``) and writes (``run_extern``) must agree on storage,
+        so both route through here.
+        """
+        cur_meta = table.get(name or "", {})
+        cur_bid = bid
+        view_offset = 0
+        _seen: set[int] = set()
+        while cur_meta.get("view_of") and cur_bid is not None and cur_bid not in _seen:
+            _seen.add(cur_bid)
+            view_offset += int(cur_meta.get("offset", 0))
+            cur_meta = table.get(cur_meta["view_of"], {})
+            cur_bid = cur_meta.get("buffer_id")
+        base_bid = cur_bid if cur_bid is not None else bid
+        return base_bid, view_offset
+
     def tensor_for(arg: dict, table: dict) -> Any:
         """Resolve a step arg to a device tensor.
 
@@ -196,11 +219,12 @@ def replay(
                 bid = _bid_of(table, name)
         if bid is None and name is not None:
             bid = name_bid_hint.get(name)
+        base_bid, view_offset = _resolve_base(name, table, bid)
         shape, stride = arg.get("shape"), arg.get("stride")
-        if bid is not None and bid in storages:
+        if base_bid is not None and base_bid in storages:
             if shape and stride:
-                return storages[bid].as_strided(
-                    [int(s) for s in shape], [int(s) for s in stride]
+                return storages[base_bid].as_strided(
+                    [int(s) for s in shape], [int(s) for s in stride], view_offset
                 )
             # No per-arg layout: fall back to the table's recorded layout.
             meta_shape, meta_stride = meta.get("shape"), meta.get("stride")
@@ -208,9 +232,9 @@ def replay(
                 shape = [int(s) for s in meta_shape]
                 stride = [int(s) for s in meta_stride]
                 span = sum((s - 1) * st for s, st in zip(shape, stride)) + 1
-                if storages[bid].numel() >= span:
-                    return storages[bid].as_strided(shape, stride)
-            return tensors[bid]
+                if storages[base_bid].numel() >= span + view_offset:
+                    return storages[base_bid].as_strided(shape, stride, view_offset)
+            return tensors[base_bid if base_bid is not None else bid]
         if name is not None and name in name_tensors:
             return name_tensors[name]
         meta_shape = meta.get("shape")
@@ -328,6 +352,10 @@ def replay(
             or _bid_of(table, out_name)
             or name_bid_hint.get(out_name)
         )
+        # Writes must land on the same storage reads (tensor_for) pull from:
+        # resolve the base allocation via the view_of chain, not the raw
+        # launch-trace buffer_id (a view id, not the underlying allocation).
+        base_bid, view_offset = _resolve_base(out_name, table, out_bid)
         # Layout priority: downstream consumer → static table → alias/view → contiguous.
         meta = table.get(out_name or "", {})
         hint_name = out_name
@@ -346,21 +374,38 @@ def replay(
                 bs = [int(s) for s in buf_meta["stride"]]
                 if len(bs) == len(result.shape):
                     layout = (list(result.shape), bs)
-        if out_bid is not None and out_bid in storages:
-            storage = storages[out_bid]
+        if base_bid is not None and base_bid in storages:
+            storage = storages[base_bid]
             if layout is not None:
                 shape, stride = layout
                 span = sum((s - 1) * st for s, st in zip(shape, stride)) + 1
-                if storage.numel() >= span and list(result.shape) == shape:
-                    view = storage.as_strided(shape, stride)
+                if (
+                    storage.numel() >= span + view_offset
+                    and list(result.shape) == shape
+                ):
+                    view = storage.as_strided(shape, stride, view_offset)
                     view.copy_(result)
-                    tensors[out_bid] = view
+                    tensors[base_bid] = view
+                    if out_bid is not None and out_bid != base_bid:
+                        tensors[out_bid] = view
                     return
             n = int(result.numel())
-            if storage.numel() >= n:
-                view = storage[:n].view([int(s) for s in result.shape])
-                view.copy_(result.contiguous())
-                tensors[out_bid] = view
+            if storage.numel() >= n + view_offset:
+                r_stride = tuple(int(s) for s in result.stride())
+                r_shape = [int(s) for s in result.shape]
+                span_r = sum((s - 1) * st for s, st in zip(r_shape, r_stride)) + 1
+                if (
+                    not result.is_contiguous()
+                    and len(r_stride) == len(r_shape)
+                    and storage.numel() >= span_r + view_offset
+                ):
+                    view = storage.as_strided(r_shape, r_stride, view_offset)
+                else:
+                    view = storage[view_offset : view_offset + n].view(r_shape)
+                view.copy_(result)
+                tensors[base_bid] = view
+                if out_bid is not None and out_bid != base_bid:
+                    tensors[out_bid] = view
                 return
         # No runtime buffer identity: result becomes the named buffer.
         if out_name:
@@ -391,13 +436,36 @@ def replay(
 
     drv.cuStreamSynchronize(stream)
 
-    output_bid: int | None = None
-    for buf in buffers_meta:
-        if buf["kind"] == "output":
-            output_bid = buf["id"]
-            break
-    if output_bid is None:
+    # Select the output buffer matching io.outputs[0]'s declared shape.
+    # For multi-output modules the registry tags every tuple element as
+    # kind="output" in buffer-creation order, which need not match the
+    # return tuple's order — picking manifest-first returns the wrong tensor.
+    io_outputs = manifest.get("io", {}).get("outputs", [])
+    output_bufs = [b for b in buffers_meta if b["kind"] == "output"]
+    if not output_bufs:
         raise RuntimeError("no output buffer in manifest")
+
+    if io_outputs:
+        expected_shape = [int(s) for s in io_outputs[0]["shape"]]
+        expected_numel = math.prod(expected_shape)
+        chosen = next(
+            (b for b in output_bufs if [int(s) for s in b["shape"]] == expected_shape),
+            None,
+        )
+        if chosen is None:
+            chosen = next(
+                (
+                    b
+                    for b in output_bufs
+                    if math.prod(int(s) for s in b["shape"]) == expected_numel
+                ),
+                output_bufs[0],
+            )
+    else:
+        expected_shape = None
+        chosen = output_bufs[0]
+
+    output_bid = chosen["id"]
 
     # Prefer the final writer's layout over the registry's first-seen view.
     out_t = tensors[output_bid]
@@ -414,10 +482,8 @@ def replay(
     # Apply the graph's output reshape (inductor's return expression wraps
     # the output buffer with reinterpret_tensor to give it the model's
     # declared output shape/stride). io.outputs carries the declared shape.
-    io_outputs = manifest.get("io", {}).get("outputs", [])
-    if io_outputs:
-        expected_shape = [int(s) for s in io_outputs[0]["shape"]]
-        if list(out_t.shape) != expected_shape and out_t.is_contiguous():
+    if expected_shape is not None and list(out_t.shape) != expected_shape:
+        if out_t.is_contiguous():
             out_t = out_t.view(expected_shape)
     return out_t
 

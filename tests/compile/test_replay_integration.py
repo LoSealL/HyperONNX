@@ -21,7 +21,7 @@ import torch
 import torchvision as tv
 
 from hyperonnx import export_hyper_onnx
-from hyperonnx.compile.testing import verify
+from hyperonnx.compile.testing import replay, verify
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
@@ -460,3 +460,297 @@ def test_ttir_dump_when_env_set(tmp_path: Path, monkeypatch):
     bundle = Path(glob.glob(str(tmp_path / "*.kernels"))[0])
     assert list(bundle.glob("*.ttir")), "TTIR should be written with env var"
     assert list(bundle.glob("*.ttgir")), "TTGIR should be written with env var"
+
+
+# ---------------------------------------------------------------------------
+# Known-issue regression tests (document the two replay blockers discovered
+# via the MatchStereo model-zoo bundle replay, 2026-08-04).
+# ---------------------------------------------------------------------------
+
+
+def test_multi_output_module_tags_output_buffer(tmp_path: Path):
+    """A module returning a tuple must tag output buffers in the registry.
+
+    identify_output receives the compiled forward's return value. When the
+    output is a tuple, getattr(tuple, "data_ptr", ...) returns None and the
+    call is a no-op — no buffer gets kind="output", so replay() raises
+    "no output buffer in manifest".
+
+    Reproduces MatchAttentionLayer which returns (x, self_rpos, field).
+    """
+
+    class _Multi(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(16, 16)
+
+        def forward(self, x):
+            h = self.lin(x)
+            return h, h * 2
+
+    model = _Multi().cuda().eval()
+    sample = (torch.randn(2, 8, 16, device="cuda"),)
+    _export(model, sample, [_Multi], tmp_path)
+    man = _manifests(tmp_path)[0]
+    assert len(man["io"]["outputs"]) == 2, "manifest should list 2 outputs"
+    output_bufs = [b for b in man["buffers"] if b["kind"] == "output"]
+    assert output_bufs, (
+        "at least one registry buffer must be tagged kind=output for replay "
+        "to locate the result"
+    )
+
+
+def test_gather_mm_does_not_leak_int64_into_extern(tmp_path: Path):
+    """A module with int64 gather indices + float mm must not leak dtype.
+
+    Inductor's memory planner may reuse the same storage for temporaries of
+    different dtypes. The launch trace freezes dtype on first sight (int64
+    from an index intermediate), but the allocate records float32. Replay
+    then resolves a float32 view over int64 storage and the extern mm
+    receives mismatched dtypes.
+
+    Reproduces MatchAttentionLayer_705 buffer_id=29 where registry says
+    int64 but the allocate is float32.
+
+    NOTE: this minimal model may not trigger inductor's reuse deterministically;
+    the test asserts no dtype conflicts exist between registry and allocates.
+    If inductor doesn't reuse here, the test passes trivially (no regression).
+    """
+
+    class _GatherMM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(32, 32)
+
+        def forward(self, x, offset):
+            B, N, C = x.shape
+            idx = torch.floor(offset).long().clamp(0, N - 1).squeeze(-1)
+            idx_expand = idx.unsqueeze(-1).expand(-1, -1, C)
+            gathered = torch.gather(x, 1, idx_expand)
+            return self.lin(gathered)
+
+    model = _GatherMM().cuda().eval()
+    sample = (
+        torch.randn(2, 8, 32, device="cuda"),
+        torch.randn(2, 8, 1, device="cuda"),
+    )
+    _export(model, sample, [_GatherMM], tmp_path)
+    man = _manifests(tmp_path)[0]
+    # Check for dtype conflicts between registry and graph-table allocates.
+    tbl = man["pipeline"][0].get("buffers", {}) if man["pipeline"] else {}
+    conflicts = []
+    for _name, meta in tbl.items():
+        if meta.get("kind") != "allocate":
+            continue
+        bid = meta.get("buffer_id")
+        if bid is None:
+            continue
+        reg = next((b for b in man["buffers"] if b["id"] == bid), None)
+        if reg and reg["dtype"] != meta.get("dtype"):
+            conflicts.append((bid, reg["dtype"], meta["dtype"]))
+    assert not conflicts, (
+        f"registry/allocate dtype conflicts: {conflicts} — "
+        "replay would pass int64 storage to a float32 extern mm"
+    )
+
+
+def test_replay_multi_output_selects_correct_buffer(tmp_path: Path):
+    """replay() must return the buffer matching io.outputs[0]'s shape, not
+    the manifest-order-first output buffer.
+
+    For multi-output modules every tuple element is tagged kind="output" in
+    buffer-creation order. We compute the LARGER output first (``big``) but
+    return it SECOND, so the manifest-first output buffer is io.outputs[1]
+    (shape [2,8,16]) while io.outputs[0] is the smaller [2,8,8]. Without the
+    fix, replay picks the [2,8,16] buffer and the final reshape to [2,8,8]
+    raises (numel 256 vs 128); with the fix it matches by shape and returns
+    the correct tensor.
+    """
+
+    class _Multi(torch.nn.Module):
+        def forward(self, x):
+            big = x * 3.0  # [2,8,16], materialized first
+            small = big[:, :, :8] + 7.0  # [2,8,8], depends on big
+            return small, big
+
+    model = _Multi().cuda().eval()
+    sample = (torch.randn(2, 8, 16, device="cuda"),)
+    _export(model, sample, [_Multi], tmp_path)
+    man = _manifests(tmp_path)[0]
+    io_out = man["io"]["outputs"]
+    assert len(io_out) == 2, "manifest should list 2 outputs"
+    out_bufs = [b for b in man["buffers"] if b["kind"] == "output"]
+    assert out_bufs, "module should tag output buffers"
+    # Precondition for the regression: manifest-first output buffer must NOT
+    # already match io.outputs[0]'s shape, otherwise the old bug is inert.
+    first_out_shape = [int(s) for s in out_bufs[0]["shape"]]
+    expected_shape = [int(s) for s in io_out[0]["shape"]]
+    assert first_out_shape != expected_shape, (
+        "precondition not met: manifest-first output buffer already matches "
+        "io.outputs[0]; test would not exercise the bug"
+    )
+
+    expected = model(*sample)[0].detach()
+    ok = verify(
+        glob.glob(str(tmp_path / "*.kernels"))[0],
+        list(sample),
+        expected,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+    assert ok, "replay did not return the io.outputs[0] buffer"
+
+
+def test_reinterpret_view_captures_offset(tmp_path: Path):
+    """A cat whose inputs are written to non-zero-offset slices of a
+    pre-allocated buffer (inductor's ReinterpretLine) must record the real
+    storage offset in the manifest.
+
+    inductor allocates one buffer for the cat output and reinterprets it at
+    each input's slice offset (``reinterpret_tensor(buf, shape, stride,
+    offset)``). The capture code must read the offset from the view's layout
+    — ``NonOwningLayout.offset`` is always 0 (its ``__init__`` drops the
+    view's offset), so reading ``line.layout.offset`` records every view at
+    offset 0 and replay aliases all slices to channel 0.
+
+    The module mirrors MatchAttentionLayer's cat phase: the three inputs
+    (x, field*scale, rpos) are written by separate triton kernels into
+    non-zero-offset slices (offset 256/258 of a 266-wide buffer).
+    """
+
+    class _CatSlices(torch.nn.Module):
+        def __init__(self, dim, num_head):
+            super().__init__()
+            self.norm = torch.nn.LayerNorm(dim + 2 + num_head * 2)
+            self.num_head = num_head
+
+        def forward(self, x, rpos, field):
+            B, H, W, _ = x.shape
+            scale = self.norm.weight.new_ones(1, 1, 1, 2)
+            x_cat = torch.cat(
+                (x, field * scale.to(field.dtype), rpos), dim=-1
+            ).contiguous()
+            grid = torch.meshgrid(
+                torch.arange(H, device=x.device),
+                torch.arange(W, device=x.device),
+                indexing="ij",
+            )
+            coords = torch.stack(grid[::-1], dim=-1)[None].repeat(
+                1, 1, 1, self.num_head
+            )
+            off = (rpos + coords).view(B, H * W, self.num_head, 2).contiguous()
+            return x_cat, self.norm(x_cat), off
+
+    dim, num_head = 256, 4
+    model = _CatSlices(dim, num_head).cuda().eval()
+    sample = (
+        torch.randn(2, 12, 20, dim, device="cuda"),
+        torch.randn(2, 12, 20, num_head * 2, device="cuda"),
+        torch.randn(2, 12, 20, 2, device="cuda"),
+    )
+    _export(model, sample, [_CatSlices], tmp_path)
+    manifests = _manifests(tmp_path)
+    assert manifests, "no kernel bundle produced"
+    # At least one view_of entry must carry a non-zero offset — the cat's
+    # non-first slice lives deeper in the pre-allocated buffer.
+    nonzero = [
+        (name, meta["offset"])
+        for man in manifests
+        for g in man["pipeline"]
+        for name, meta in g.get("buffers", {}).items()
+        if meta.get("view_of") and int(meta.get("offset", 0)) != 0
+    ]
+    assert nonzero, (
+        "no non-zero-offset view_of recorded — ReinterpretLine offset "
+        "capture is broken (NonOwningLayout.offset is always 0)"
+    )
+
+
+def test_run_extern_writes_to_view_base_storage(tmp_path: Path):
+    """An extern_kernel whose output buffer is a ``view_of`` a different base
+    allocation must write its result into that BASE storage — the same storage
+    ``tensor_for`` reads pull from.
+
+    The launch-trace ``buffer_id`` on the extern output is the VIEW's runtime
+    id, not the underlying allocation. Before the fix, ``run_extern`` wrote to
+    ``storages[out_bid]`` (the view id) while downstream ``tensor_for`` reads
+    followed ``view_of`` to ``storages[base_bid]`` — so reads saw stale data.
+
+    This builds a minimal extern-only bundle (no cubins needed) where an
+    ``aten.mm`` output is declared ``view_of`` a separate output allocation,
+    then asserts replay returns the correct mm product. Without the fix the
+    write misses the output storage and replay returns zeros.
+    """
+
+    bundle = tmp_path / "mmview.kernels"
+    bundle.mkdir()
+    manifest = {
+        "buffers": [
+            {
+                "id": 0,
+                "kind": "input",
+                "name": "x",
+                "dtype": "float32",
+                "shape": [2, 2],
+            },
+            {
+                "id": 1,
+                "kind": "input",
+                "name": "w",
+                "dtype": "float32",
+                "shape": [2, 2],
+            },
+            {"id": 2, "kind": "output", "dtype": "float32", "shape": [2, 2]},
+            {"id": 3, "kind": "intermediate", "dtype": "float32", "shape": [2, 2]},
+        ],
+        "io": {
+            "inputs": [
+                {"name": "x", "dtype": "float32", "shape": [2, 2]},
+                {"name": "w", "dtype": "float32", "shape": [2, 2]},
+            ],
+            "outputs": [{"name": "y", "dtype": "float32", "shape": [2, 2]}],
+        },
+        "pipeline": [
+            {
+                "buffers": {
+                    "buf_base": {
+                        "kind": "allocate",
+                        "buffer_id": 2,
+                        "shape": [2, 2],
+                        "stride": [2, 1],
+                        "dtype": "float32",
+                    },
+                    "buf_view": {
+                        "kind": "view",
+                        "view_of": "buf_base",
+                        "buffer_id": 3,
+                        "shape": [2, 2],
+                        "stride": [2, 1],
+                        "dtype": "float32",
+                    },
+                },
+                "steps": [
+                    {
+                        "type": "extern_kernel",
+                        "kernel": "extern_kernels.mm",
+                        "args": [
+                            {"kind": "tensor", "name": "x", "buffer_id": 0},
+                            {"kind": "tensor", "name": "w", "buffer_id": 1},
+                        ],
+                        "output": {"name": "buf_view", "buffer_id": 3},
+                    }
+                ],
+            }
+        ],
+    }
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+
+    x = torch.randn(2, 2, device="cuda")
+    w = torch.randn(2, 2, device="cuda")
+    expected = (x @ w).detach()
+    out = replay(bundle, [x, w])
+    assert list(out.shape) == [2, 2]
+    assert torch.allclose(out, expected, atol=1e-5, rtol=1e-5), (
+        f"extern mm output (view_of base) not written to base storage: "
+        f"max_abs_diff={((out - expected).abs().max()).item()}"
+    )

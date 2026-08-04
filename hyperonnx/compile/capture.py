@@ -119,8 +119,6 @@ class CaptureSink:
     ) -> None:
         """Build a CompiledKernel from listener data and record it."""
         name = metadata.get("name", f"kernel_{len(self.kernels)}")
-        # ponytail: listener API doesn't surface the real hash; placeholder
-        # is fine since the capture path never reads ck.hash.
         try:
             ck = inductor.compiled_kernel_cls()(
                 src, metadata_group, hash="listener_captured"
@@ -175,8 +173,6 @@ def _target_to_dict(target: Any) -> GPUTarget:
 
 
 def _infer_args(meta: Any) -> list[KernelArgDescriptor]:  # pylint: disable=unused-argument
-    # ponytail: v1 records minimal arg metadata; wrapper-codegen arg
-    # parsing is handled by the pipeline merge in bundle.py.
     return []
 
 
@@ -279,6 +275,22 @@ def capture_wrapper_lines():
         PythonWrapperCodegen._generate = orig_generate
 
 
+def _storage_span(shape: tuple[int, ...], stride: tuple[int, ...]) -> int:
+    """Element count spanned by a ``(shape, stride)`` layout (>= 0).
+
+    A contiguous fallback (``prod(shape)``) is used when the stride is
+    empty. Returns 0 for empty shapes.
+    """
+    if not shape:
+        return 0
+    if stride and len(stride) == len(shape):
+        return sum((s - 1) * st for s, st in zip(shape, stride)) + 1
+    n = 1
+    for s in shape:
+        n *= s
+    return n
+
+
 def _line_type_name(line: Any) -> str:
     """``KernelCallLine`` → ``kernel_call``; ``AllocateLine`` → ``allocate``."""
     name = type(line).__name__
@@ -364,7 +376,17 @@ def _serialize_wrapper_line(line: Any) -> dict | None:
         meta = _serialize_buffer(line.reused_as)
         if meta:
             step.update(meta)
-        offset = getattr(line.layout, "offset", None)
+        # NonOwningLayout.offset is always 0 (its __init__ drops the view's
+        # offset); the real storage offset lives on the view's layout.
+        offset = None
+        view = getattr(line.layout, "view", None)
+        if view is not None:
+            try:
+                offset = view.get_layout().offset
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if offset is None:
+            offset = getattr(line.layout, "offset", None)
         if offset is not None:
             step["offset"] = str(offset)
         return step
@@ -457,8 +479,6 @@ def capture_compiled_kernels():
 
     sink = CaptureSink()
     if not hasattr(kc, "listener"):
-        # ponytail: triton < 3.7 (torch < 2.10) has no compilation listener hook.
-        # Compile capture is silently disabled; the ONNX function still exports.
         warning(
             "triton.knobs.compilation.listener not available "
             "(triton < 3.7 / torch < 2.10); compile capture disabled."
@@ -595,6 +615,12 @@ class LaunchTraceSink:
 
         Unseen pointers are registered as ``"intermediate"`` buffers; the
         caller rewrites them to ``"output"`` later via :meth:`identify_output`.
+
+        Shapes freeze on first sight, but a known buffer may be re-sighted
+        with a *larger* storage span (e.g. the full allocation is passed to
+        a kernel after an earlier smaller view was seen). In that case the
+        recorded layout grows to cover the larger span so the registry
+        reflects the true allocation size.
         """
         if data_ptr not in self._ptr_to_buf:
             buf = BufferInfo(
@@ -608,7 +634,12 @@ class LaunchTraceSink:
             self._ptr_to_buf[data_ptr] = buf
             self.buffers.append(buf)
             self._next_id += 1
-        return self._ptr_to_buf[data_ptr].buffer_id
+            return buf.buffer_id
+        buf = self._ptr_to_buf[data_ptr]
+        if _storage_span(shape, stride) > _storage_span(buf.shape, buf.stride):
+            buf.shape = shape
+            buf.stride = stride
+        return buf.buffer_id
 
     def pre_register(
         self,
@@ -638,15 +669,26 @@ class LaunchTraceSink:
         self.buffers.append(buf)
         self._next_id += 1
 
-    def identify_output(self, output_tensor: Any) -> None:
-        """Mark the buffer backing ``output_tensor`` as kind ``"output"``.
+    def identify_output(self, output: Any) -> None:
+        """Mark the buffer backing ``output`` as kind ``"output"``.
 
-        No-op when the output is a fresh allocation whose pointer was never
-        passed to a kernel (then no buffer is marked and replay raises); the
-        caller is expected to pass the same tensor object the traced forward
-        produced.
+        Recurses into tuple/list/dict outputs so multi-output modules
+        (e.g. one returning ``(x, self_rpos, field)``) tag every element's
+        backing buffer.
+
+        No-op for elements whose pointer was never passed to a kernel
+        (fresh allocations); the caller is expected to pass the same tensor
+        objects the traced forward produced.
         """
-        ptr = getattr(output_tensor, "data_ptr", lambda: None)()
+        if isinstance(output, (tuple, list)):
+            for item in output:
+                self.identify_output(item)
+            return
+        if isinstance(output, dict):
+            for item in output.values():
+                self.identify_output(item)
+            return
+        ptr = getattr(output, "data_ptr", lambda: None)()
         if ptr is not None and ptr in self._ptr_to_buf:
             self._ptr_to_buf[ptr].kind = "output"
 

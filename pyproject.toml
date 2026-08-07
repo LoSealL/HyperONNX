@@ -71,6 +71,11 @@ dev = [
     "transformers>=5.0.0",
 ]
 
+cutlass = [
+    "nvidia-cutlass>=4.2.0.0; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]; sys_platform == 'linux'",
+]
+
 [tool.setuptools]
 # Compatible with setuptools, when change build-system to setuptools.
 packages = ["hyperonnx"]

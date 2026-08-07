@@ -326,6 +326,8 @@ def _collect_and_attach_kernels(
     external_directory: str | PathLike | None,
     compile_static_grid: bool,
     logger: Logger,
+    cutlass_tune: bool = False,
+    cutlass_arch: str | None = None,
 ):
     """Run ``torch.compile`` per marked module and attach kernel bundles.
 
@@ -352,6 +354,10 @@ def _collect_and_attach_kernels(
         compile_static_grid: when ``True``, skip :func:`attach_grid_exprs`
             and leave ``launch.grid_expr`` null for every captured kernel.
         logger: nested logger from :func:`hyper_export`.
+        cutlass_tune: when ``True``, run :func:`annotate_cutlass_config`
+            on each kernel bundle after writing.
+        cutlass_arch: SM architecture string passed to the CUTLASS replacement
+            (e.g. ``"sm90"``). ``None`` uses the CUTLASS default.
     """
     if not hasattr(torch, "compile"):
         raise RuntimeError(
@@ -435,6 +441,15 @@ def _collect_and_attach_kernels(
             wrapper_text=wrapper_text,
             wrapper_graph=wrapper_graph,
         )
+
+        if cutlass_tune:
+            try:
+                from hyperonnx.compile.cutlass import annotate_cutlass_config
+
+                bundle_dir = out_dir / legalize_path_name(f"{type_name}.kernels")
+                annotate_cutlass_config(bundle_dir, arch=cutlass_arch)
+            except Exception as exc:
+                logger.warning(f"CUTLASS tuning failed for {type_name}: {exc}")
 
 
 def _extract_inductor_wrapper(cache_dir: Path) -> str | None:
@@ -539,6 +554,8 @@ def export_hyper_onnx(  # noqa: C901
     hiera: Collection[type[Module]] | None = None,
     compile_hier: Collection[type[Module]] | None = None,
     compile_static_grid: bool = False,
+    cutlass_tune: bool = False,
+    cutlass_arch: str | None = None,
     module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
     fold_nodes_to_functions: bool = True,
@@ -685,6 +702,8 @@ def export_hyper_onnx(  # noqa: C901
             external_directory=external_directory,
             compile_static_grid=compile_static_grid,
             logger=logger,
+            cutlass_tune=cutlass_tune,
+            cutlass_arch=cutlass_arch,
         )
 
     if model in module_spec:

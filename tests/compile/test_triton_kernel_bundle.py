@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import json
+import os
 
 import pytest
 import torch
@@ -116,8 +117,11 @@ class TestCompileModuleC(torch.nn.Module):
     ],
     ids=["LayerNorm", "LinearSoftmax", "SelfAttentionCausal", "ResNetBasicBlock"],
 )
-def test_export_triton_kernel_bundle(tmp_path, module, inputs):
+@pytest.mark.parametrize("cutlass", [False, True], ids=["aten", "cutlass"])
+def test_export_triton_kernel_bundle(tmp_path, module, inputs, cutlass):
     """Test export of a Triton kernel bundle"""
+    if cutlass and os.name == "nt":
+        pytest.skip("cutlass is not supported on Windows")
     module.cuda().eval()
     export_hyper_onnx(
         module,
@@ -156,8 +160,9 @@ def test_export_triton_kernel_bundle(tmp_path, module, inputs):
     output = replay(
         tmp_path / f"{type(module).__name__}_0.kernels",
         inputs,
+        cutlass=cutlass,
     )
     ref_output = module(*inputs)
-    assert torch.allclose(output, ref_output, atol=1e-4)
+    assert torch.allclose(output, ref_output, atol=1e-2 if cutlass else 1e-4)
     inputs[0].detach().cpu().numpy().tofile(tmp_path / "x.bin")
     output.detach().cpu().numpy().tofile(tmp_path / "output.bin")

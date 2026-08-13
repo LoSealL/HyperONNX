@@ -81,6 +81,60 @@ def _extract_matmul_shapes(
     return M, N, K, dtype
 
 
+def _compile_gemm(
+    M: int,
+    N: int,
+    K: int,
+    arch: str,
+    block_m: int,
+    block_n: int,
+    in_type,
+    out_type,
+):
+    """Compile a naive CuTe DSL GEMM kernel.
+
+    One thread per output element; ``block_m × block_n`` threads per block.
+    Used by both the tuner (benchmark) and the replay runner.
+    """
+
+    @cute.kernel
+    def gemm_kernel(
+        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, M: Int32, N: Int32, K: Int32
+    ):
+        row = cute_arch.block_idx()[0] * block_m + cute_arch.thread_idx()[0]
+        col = cute_arch.block_idx()[1] * block_n + cute_arch.thread_idx()[1]
+        if row < M and col < N:
+            acc = Float32(0.0)
+            for k in range(K):
+                acc = acc + A[row, k].to(Float32) * B[k, col].to(Float32)  # type: ignore[reportAttributeAccessIssue]
+            C[row, col] = acc.to(out_type)
+
+    @cute.jit
+    def gemm_jit(
+        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, M: Int32, N: Int32, K: Int32
+    ):
+        grid_x = (M + block_m - 1) // block_m
+        grid_y = (N + block_n - 1) // block_n
+        gemm_kernel(A, B, C, M, N, K).launch(
+            grid=(grid_x, grid_y, 1), block=(block_m, block_n, 1)
+        )
+
+    fake_a = make_fake_tensor(in_type, (M, K), (K, 1))
+    fake_b = make_fake_tensor(in_type, (K, N), (N, 1))
+    fake_c = make_fake_tensor(out_type, (M, N), (N, 1))
+
+    return cute.compile(
+        gemm_jit,
+        fake_a,
+        fake_b,
+        fake_c,
+        M,
+        N,
+        K,
+        options=f"--gpu-arch {arch}",
+    )
+
+
 def _compile_and_bench_mm(
     M: int,
     N: int,
@@ -91,45 +145,8 @@ def _compile_and_bench_mm(
     iters: int = 20,
 ) -> float:
     """Compile a tiled GEMM with CuTe DSL and benchmark it. Returns avg ms."""
-
-    tile_m = config.tile_m
-    tile_n = config.tile_n
-
-    @cute.kernel
-    def gemm_kernel(
-        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, M: Int32, N: Int32, K: Int32
-    ):
-        row = cute_arch.block_idx()[0] * tile_m + cute_arch.thread_idx()[0]
-        col = cute_arch.block_idx()[1] * tile_n + cute_arch.thread_idx()[1]
-        if row < M and col < N:
-            acc = Float32(0.0)
-            for k in range(K):
-                acc = acc + A[row, k].to(Float32) * B[k, col].to(Float32)  # type: ignore[reportAttributeAccessIssue]
-            C[row, col] = acc.to(Float16)
-
-    @cute.jit
-    def gemm_jit(
-        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, M: Int32, N: Int32, K: Int32
-    ):
-        grid_x = (M + tile_m - 1) // tile_m
-        grid_y = (N + tile_n - 1) // tile_n
-        gemm_kernel(A, B, C, M, N, K).launch(
-            grid=(grid_x, grid_y, 1), block=(tile_m, tile_n, 1)
-        )
-
-    fake_a = make_fake_tensor(Float16, (M, K), (K, 1))
-    fake_b = make_fake_tensor(Float16, (K, N), (N, 1))
-    fake_c = make_fake_tensor(Float16, (M, N), (N, 1))
-
-    compiled = cute.compile(
-        gemm_jit,
-        fake_a,
-        fake_b,
-        fake_c,
-        M,
-        N,
-        K,
-        options=f"--gpu-arch {arch}",
+    compiled = _compile_gemm(
+        M, N, K, arch, config.tile_m, config.tile_n, Float16, Float16
     )
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")

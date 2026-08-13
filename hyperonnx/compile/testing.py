@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from onnxifier.logger import debug
 
 
 def _check(ret: Any, label: str) -> None:
@@ -63,6 +64,8 @@ def _parse_extern_kwargs(kwarg_strs: list[str]) -> dict:
 def replay(
     bundle_dir: str | Path,
     input_arrays: list[torch.Tensor],
+    *,
+    cutlass: bool = False,
 ) -> torch.Tensor:
     """Replay a recorded pipeline from a kernel bundle.
 
@@ -78,6 +81,11 @@ def replay(
         bundle_dir: path to the ``<type>.kernels/`` directory.
         input_arrays: positional input tensors, matching the
             manifest's ``io.inputs`` order.
+        cutlass: when ``True``, extern_kernel steps that carry a
+            ``cutlass_config`` and have a registered CUTLass runner
+            (mm / bmm / addmm) are executed via CuTe DSL GEMM kernels
+            instead of ``torch.ops.aten``. Requires Linux + CuTe DSL.
+            Unsupported ops and steps without config fall through to aten.
 
     Returns:
         The output tensor.
@@ -88,6 +96,12 @@ def replay(
     _, dev = drv.cuDeviceGet(0)
     _, ctx = drv.cuDevicePrimaryCtxRetain(dev)
     drv.cuCtxPushCurrent(ctx)
+
+    arch: str | None = None
+    if cutlass:
+        from .cutlass_kernels.extract import detect_gpu_arch
+
+        arch = detect_gpu_arch()
 
     bundle_dir = Path(bundle_dir)
     manifest = json.loads((bundle_dir / "manifest.json").read_text())
@@ -343,8 +357,18 @@ def replay(
             elif "value" in a:
                 args.append(a["value"])
         kwargs = _parse_extern_kwargs(step.get("kwargs", []))
-        op = getattr(torch.ops.aten, op_name)
-        result = op(*args, **kwargs)
+        config = step.get("cutlass_config")
+        use_cutlass = cutlass and bool(config)
+        if use_cutlass:
+            from .cutlass_kernels.run import run_cutlass_extern
+
+            debug(f"extern_kernel {op_name} → cutlass")
+            assert config is not None and arch is not None
+            result = run_cutlass_extern(op_name, args, config, arch, kwargs=kwargs)
+        else:
+            debug(f"extern_kernel {op_name} → aten")
+            op = getattr(torch.ops.aten, op_name)
+            result = op(*args, **kwargs)
 
         out_name = step["output"].get("name")
         out_bid = (
@@ -495,9 +519,10 @@ def verify(
     *,
     atol: float = 1e-3,
     rtol: float = 1e-3,
+    cutlass: bool = False,
 ) -> bool:
     """Replay from bundle and compare against expected output."""
-    out = replay(bundle_dir, input_arrays)
+    out = replay(bundle_dir, input_arrays, cutlass=cutlass)
     ok = torch.allclose(out, expected_output, atol=atol, rtol=rtol)
     if not ok:
         diff = (out.float() - expected_output.float()).abs()

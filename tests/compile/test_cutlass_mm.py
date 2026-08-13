@@ -1,6 +1,11 @@
 """Tests for CUTLASS GEMM shape extraction (mm, bmm, addmm)."""
 
-from hyperonnx.compile.cutlass_kernels.mm import _extract_matmul_shapes
+import pytest
+
+try:
+    from hyperonnx.compile.cutlass_kernels.mm import _extract_matmul_shapes
+except ImportError:
+    pytest.skip("CUTLASS is not available", allow_module_level=True)
 
 
 def _tensor_arg(shape, name="x", dtype="float16"):

@@ -19,13 +19,13 @@ import json
 import pytest
 import torch
 import torchvision as tv
-import triton
 
 from hyperonnx import export_hyper_onnx
 from hyperonnx.compile.testing import replay
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA is not available", allow_module_level=True)
+triton = pytest.importorskip("triton", reason="Triton is not available")
 
 
 class TestCompileModuleA(torch.nn.Module):
@@ -159,3 +159,5 @@ def test_export_triton_kernel_bundle(tmp_path, module, inputs):
     )
     ref_output = module(*inputs)
     assert torch.allclose(output, ref_output, atol=1e-4)
+    inputs[0].detach().cpu().numpy().tofile(tmp_path / "x.bin")
+    output.detach().cpu().numpy().tofile(tmp_path / "output.bin")

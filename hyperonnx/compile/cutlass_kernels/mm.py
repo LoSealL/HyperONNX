@@ -20,7 +20,8 @@ Only tunes and returns the best config — no cubin export.
 import cutlass.cute as cute
 import cutlass.cute.arch as cute_arch
 import torch
-from cutlass.cute import Float16, Float32, Int32
+from cutlass.base_dsl.typing import Int32
+from cutlass.cute import Float16, Float32
 from cutlass.cute.runtime import make_fake_tensor
 
 from .config import MM_CONFIGS, CutlassConfig
@@ -103,7 +104,7 @@ def _compile_and_bench_mm(
         if row < M and col < N:
             acc = Float32(0.0)
             for k in range(K):
-                acc = acc + A[row, k].to(Float32) * B[k, col].to(Float32)
+                acc = acc + A[row, k].to(Float32) * B[k, col].to(Float32)  # type: ignore[reportAttributeAccessIssue]
             C[row, col] = acc.to(Float16)
 
     @cute.jit

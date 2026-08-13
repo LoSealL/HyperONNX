@@ -1,6 +1,18 @@
 """Tests for the CUTLASS kernel tuner registry."""
 
+import pytest
 
+try:
+    import cutlass.cute  # noqa: F401
+except ImportError:
+    cutlass = None  # type: ignore[assignment]
+
+_requires_cutlass = pytest.mark.skipif(
+    cutlass is None, reason="CUTLASS CuTe DSL not available"
+)
+
+
+@_requires_cutlass
 def test_get_tuner_mm():
     from hyperonnx.compile.cutlass_kernels import get_tuner
 
@@ -8,6 +20,7 @@ def test_get_tuner_mm():
     assert callable(tuner)
 
 
+@_requires_cutlass
 def test_get_tuner_conv():
     from hyperonnx.compile.cutlass_kernels import get_tuner
 

@@ -234,7 +234,7 @@ def replay(
                 span = sum((s - 1) * st for s, st in zip(shape, stride)) + 1
                 if storages[base_bid].numel() >= span + view_offset:
                     return storages[base_bid].as_strided(shape, stride, view_offset)
-            return tensors[base_bid if base_bid is not None else bid]
+            return tensors[base_bid]
         if name is not None and name in name_tensors:
             return name_tensors[name]
         meta_shape = meta.get("shape")

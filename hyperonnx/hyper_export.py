@@ -36,12 +36,13 @@ from torch.nn import Module
 
 from .compile.bundle import write_kernel_bundle
 from .compile.capture import (
+    LaunchTraceSink,
     attach_grid_exprs,
     capture_compiled_kernels,
     capture_launch_trace,
     capture_wrapper_lines,
 )
-from .compile.inductor import triton_version
+from .compile.inductor import config, triton_version
 from .exporter import replace_with_duck_module
 from .exporter.utils import detach_module_outputs, plain_tensor_container
 from .function_rewriter import (
@@ -380,6 +381,8 @@ def _collect_and_attach_kernels(
             capture_compiled_kernels() as sink,
             capture_launch_trace(module, spec["args"], spec.get("kwargs")) as trace,
             capture_wrapper_lines() as wrapper_graph,
+            # Disable thread pool to make sure listener can be triggered
+            config().patch(compile_threads=1),
         ):
             orig_cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
@@ -428,8 +431,10 @@ def _collect_and_attach_kernels(
             "triton_version": triton_version(),
         }
         module_io = {
-            "inputs": _spec_io(spec["args"], spec.get("kwargs", {}), spec["signature"]),
-            "outputs": _spec_io_from_output(spec.get("output")),
+            "inputs": _spec_io(
+                spec["args"], spec.get("kwargs", {}), spec["signature"], trace
+            ),
+            "outputs": _spec_io_from_output(output, trace),
         }
         write_kernel_bundle(
             directory=out_dir,
@@ -480,21 +485,29 @@ def _extract_inductor_wrapper(cache_dir: Path) -> str | None:
     return None
 
 
-def _tensor_meta(name: str, t: Tensor) -> dict:
+def _tensor_meta(name: str, t: Tensor, trace: LaunchTraceSink | None = None) -> dict:
     """Serialise one tensor as a ``{name, dtype, shape}`` manifest entry.
 
     Shape is materialised as a plain list so downstream ``json.dumps`` of
     the manifest needs no custom encoder; dtype is normalised to drop the
-    ``torch.`` prefix (``"torch.float16"`` → ``"float16"``).
+    ``torch.`` prefix (``"torch.float16"`` → ``"float16"``). When ``trace``
+    is given, ``buffer_id`` is stamped by data_ptr so the io entry links
+    unambiguously to ``manifest["buffers"]`` (whose order is creation-order,
+    not io-order).
     """
-    return {
+    entry: dict = {
         "name": name,
         "dtype": str(t.dtype).replace("torch.", ""),
         "shape": list(t.shape),
     }
+    if trace is not None:
+        bid = trace.buffer_id_of(t)
+        if bid is not None:
+            entry["buffer_id"] = bid
+    return entry
 
 
-def _spec_io(args, kwargs, sig) -> list[dict]:
+def _spec_io(args, kwargs, sig, trace: LaunchTraceSink | None = None) -> list[dict]:
     """Build the manifest ``io.inputs`` list for one module's spec.
 
     Walks the module's forward ``sig`` (skipping ``self``), pairing
@@ -502,7 +515,9 @@ def _spec_io(args, kwargs, sig) -> list[dict]:
     names. Each tensor found is flattened via
     :func:`plain_tensor_container` and emitted through
     :func:`_tensor_meta`, preserving declaration order so the manifest
-    matches the ONNX function sig exactly.
+    matches the ONNX function sig exactly. When ``trace`` is given each
+    entry is stamped with ``buffer_id`` (resolved by data_ptr) so it links
+    unambiguously to ``manifest["buffers"]``.
     """
     out: list[dict] = []
     params = list(sig.parameters.values())
@@ -512,32 +527,36 @@ def _spec_io(args, kwargs, sig) -> list[dict]:
         params = params[1:]
     # positional args
     for arg, param in zip(args, params):
-        out.extend(_tensor_meta(param.name, t) for t in plain_tensor_container(arg))
+        out.extend(
+            _tensor_meta(param.name, t, trace) for t in plain_tensor_container(arg)
+        )
     # kwargs not already covered positionally
     covered = {p.name for p in params[: len(args)]}
     for param in params[len(args) :]:
         if param.name in covered or param.name not in kwargs:
             continue
         out.extend(
-            _tensor_meta(param.name, t)
+            _tensor_meta(param.name, t, trace)
             for t in plain_tensor_container(kwargs[param.name])
         )
     return out
 
 
-def _spec_io_from_output(output) -> list[dict]:
+def _spec_io_from_output(output, trace: LaunchTraceSink | None = None) -> list[dict]:
     """Build the manifest ``io.outputs`` list from a module's traced output.
 
     Single-tensor outputs are named ``"output"``; multi-tensor outputs are
     indexed ``"output_0"``, ``"output_1"``, … mirroring the existing
-    ``_get_output_names`` convention used to label the ONNX graph.
+    ``_get_output_names`` convention used to label the ONNX graph. When
+    ``trace`` is given each entry is stamped with ``buffer_id`` (resolved
+    by data_ptr against the launch trace).
     """
     if output is None:
         return []
     tensors = plain_tensor_container(output)
     if len(tensors) <= 1:
-        return [_tensor_meta("output", t) for t in tensors]
-    return [_tensor_meta(f"output_{i}", t) for i, t in enumerate(tensors)]
+        return [_tensor_meta("output", t, trace) for t in tensors]
+    return [_tensor_meta(f"output_{i}", t, trace) for i, t in enumerate(tensors)]
 
 
 def export_hyper_onnx(  # noqa: C901

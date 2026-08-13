@@ -224,8 +224,8 @@ def _hoist_reinterpret_views(
         vbuf = f"vbuf{seq}"
         src_meta = table.get(src_name, {})
         table[vbuf] = {
-            "shape": [str(s) for s in shape],
-            "stride": [str(s) for s in stride],
+            "shape": list(shape),
+            "stride": list(stride),
             "dtype": src_meta.get("dtype", "float32"),
             "kind": "view",
             "reinterpret_of": src_name,

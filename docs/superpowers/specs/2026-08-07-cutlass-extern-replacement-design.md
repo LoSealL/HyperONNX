@@ -57,9 +57,9 @@ imports, APIs, or assumptions in the codebase.
 def replace_extern_with_cutlass(
     bundle_dir: str | Path,
     *,
-    manifest: dict | None = None,       # load from bundle_dir if None
-    arch: str | None = None,            # auto-detect if None
-    autotune: bool = True,              # benchmark configs
+    manifest: dict | None = None,  # load from bundle_dir if None
+    arch: str | None = None,  # auto-detect if None
+    autotune: bool = True,  # benchmark configs
     op_filter: set[str] | None = None,  # e.g. {"mm", "convolution"}
 ) -> Path:
     """Replace extern_kernel steps with cutlass_kernel steps.
@@ -81,10 +81,12 @@ python -m hyperonnx.compile.cutlass_bundle <bundle_dir> [--arch sm_90] [--no-aut
 
 ```python
 export_hyper_onnx(
-    model, args, "model.onnx",
+    model,
+    args,
+    "model.onnx",
     compile=[Attention],
-    cutlass_replace=True,       # NEW: run replacement after export
-    cutlass_arch=None,          # NEW: auto-detect if None
+    cutlass_replace=True,  # NEW: run replacement after export
+    cutlass_arch=None,  # NEW: auto-detect if None
     dynamo=True,
     external_data=True,
     external_directory="out/",
@@ -100,7 +102,10 @@ Extends `_KEEP_STEP_TYPES` in `bundle.py`:
 
 ```python
 _KEEP_STEP_TYPES = frozenset({
-    "allocate", "triton_kernel", "extern_kernel", "as_strided",
+    "allocate",
+    "triton_kernel",
+    "extern_kernel",
+    "as_strided",
     "cutlass_kernel",  # NEW
 })
 ```
@@ -180,10 +185,10 @@ Each generator follows:
 
 ```python
 def generate_mm(
-    args: list[dict],           # KernelArgDescriptor list from step
-    output: dict,               # output descriptor
-    buffers: dict,              # buffer table from manifest
-    arch: str,                  # e.g. "sm_90"
+    args: list[dict],  # KernelArgDescriptor list from step
+    output: dict,  # output descriptor
+    buffers: dict,  # buffer table from manifest
+    arch: str,  # e.g. "sm_90"
     config: CutlassConfig | None = None,
     autotune: bool = True,
 ) -> tuple[bytes, CutlassConfig, dict]:
@@ -214,6 +219,7 @@ class CutlassConfig:
     tile_k: int
     num_stages: int
     num_warps: int
+
 
 MM_CONFIGS = [
     CutlassConfig(128, 256, 64, 3, 4),
@@ -286,10 +292,15 @@ def detect_gpu_arch() -> str:
     """Returns CUDA compute capability, e.g. 'sm_90'."""
     try:
         import torch
+
         cap = torch.cuda.get_device_capability()
         return f"sm_{cap[0]}{cap[1]}"
     except Exception:
-        from cuda.bindings.driver import cuDeviceGetAttribute, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR
+        from cuda.bindings.driver import (
+            cuDeviceGetAttribute,
+            CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
+
         major = cuDeviceGetAttribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, 0)
         minor = cuDeviceGetAttribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, 0)
         return f"sm_{major}{minor}"
@@ -318,6 +329,7 @@ cutlass = [
 def _require_cutlass():
     try:
         import cutlass.cute as cute
+
         return cute
     except ImportError:
         raise RuntimeError(

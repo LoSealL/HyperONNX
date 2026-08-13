@@ -1,7 +1,10 @@
 """Unit tests for the bundle writer."""
 
 import json
+from inspect import signature
 from pathlib import Path
+
+import torch
 
 from hyperonnx.compile.bundle import (
     _finalize_pipeline,
@@ -11,6 +14,7 @@ from hyperonnx.compile.bundle import (
 )
 from hyperonnx.compile.capture import BufferInfo, LaunchTraceEntry, LaunchTraceSink
 from hyperonnx.compile.typing import CompiledKernelInfo
+from hyperonnx.hyper_export import _spec_io, _spec_io_from_output, _tensor_meta
 
 
 def _fake_kernel(symbol: str) -> CompiledKernelInfo:
@@ -608,3 +612,69 @@ def test_reconcile_dtype_mismatch():
     assert registry[0]["dtype"] == "float32", (
         "registry dtype should be reconciled to the allocate's float32"
     )
+
+
+def test_buffer_id_of_links_tensor_by_data_ptr():
+    """buffer_id_of resolves a tensor to its registered buffer by data_ptr.
+
+    This is the name-agnostic link that lets io entries point into
+    ``buffers[]`` without relying on creation order.
+    """
+    sink = LaunchTraceSink()
+    t = torch.zeros(2, 3)
+    sink.pre_register(t.data_ptr(), "input", "float32", (2, 3), "x")
+    assert sink.buffer_id_of(t) == 0
+    # A tensor the trace never sighted resolves to None.
+    assert sink.buffer_id_of(torch.zeros(4, 4)) is None
+
+
+def test_tensor_meta_stamps_buffer_id_only_when_trace_sighted():
+    """_tensor_meta adds buffer_id when the trace knows the tensor and
+    omits the key entirely when it does not (or when no trace is given)."""
+    sink = LaunchTraceSink()
+    t = torch.zeros(2, 3, dtype=torch.float16)
+    sink.pre_register(t.data_ptr(), "input", "float16", (2, 3), "x")
+
+    stamped = _tensor_meta("x", t, sink)
+    assert stamped["buffer_id"] == 0
+
+    plain = _tensor_meta("x", t)
+    assert "buffer_id" not in plain
+
+    unknown = torch.zeros(8, dtype=torch.float16)
+    missed = _tensor_meta("y", unknown, sink)
+    assert "buffer_id" not in missed
+
+
+def test_spec_io_stamps_buffer_ids_by_data_ptr_not_position():
+    """io entries carry buffer_id resolved by data_ptr, so the mapping is
+    correct even when buffer[] creation-order differs from io order.
+
+    Registers ``y`` before ``x`` (so y=bid 0, x=bid 1) but declares the
+    signature as ``(x, y)``: positional matching against buffers[] would
+    wrongly bind x→0, y→1; the data_ptr link must give x→1, y→0.
+    """
+    sink = LaunchTraceSink()
+    y = torch.zeros(4, dtype=torch.float16)
+    x = torch.zeros(2, 3, dtype=torch.float16)
+    sink.pre_register(y.data_ptr(), "input", "float16", (4,), "y")  # bid 0
+    sink.pre_register(x.data_ptr(), "input", "float16", (2, 3), "x")  # bid 1
+
+    def _fn(x, y): ...
+
+    entries = _spec_io([x, y], {}, signature(_fn), sink)
+    assert [e["name"] for e in entries] == ["x", "y"]
+    assert entries[0]["buffer_id"] == 1
+    assert entries[1]["buffer_id"] == 0
+
+
+def test_spec_io_from_output_stamps_output_buffer_id():
+    """_spec_io_from_output stamps the buffer_id of the identified output."""
+    sink = LaunchTraceSink()
+    out = torch.zeros(2, 2)
+    sink.get_or_create_buffer(out.data_ptr(), "float32", (2, 2))
+    sink.identify_output(out)
+    entries = _spec_io_from_output(out, sink)
+    assert len(entries) == 1
+    assert entries[0]["name"] == "output"
+    assert entries[0]["buffer_id"] == 0

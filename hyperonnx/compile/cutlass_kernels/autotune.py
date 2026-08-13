@@ -19,8 +19,6 @@ Benchmarks multiple tile configurations on the target GPU using CUDA events
 for timing. No PyTorch dependency — pure CUDA Driver API.
 """
 
-from __future__ import annotations
-
 import importlib
 from collections.abc import Callable
 from typing import Any

@@ -19,37 +19,25 @@ Maps extern_kernel names to tuner functions that return CutlassConfig.
 Each tuner takes (args, buffers, arch, configs) and returns the best config.
 """
 
-from __future__ import annotations
-
+import importlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .config import CutlassConfig as CutlassConfig
 
 _TUNER_MODULES: dict[str, tuple[str, str]] = {
-    "extern_kernels.mm": ("hyperonnx.compile.cutlass_kernels.mm", "tune_mm"),
-    "extern_kernels.bmm": ("hyperonnx.compile.cutlass_kernels.mm", "tune_mm"),
-    "extern_kernels.addmm": ("hyperonnx.compile.cutlass_kernels.mm", "tune_mm"),
-    "extern_kernels.convolution": (
-        "hyperonnx.compile.cutlass_kernels.conv",
-        "tune_conv",
-    ),
-    "extern_kernels.cudnn_convolution": (
-        "hyperonnx.compile.cutlass_kernels.conv",
-        "tune_conv",
-    ),
+    "extern_kernels.mm": (".mm", "tune_mm"),
+    "extern_kernels.bmm": (".mm", "tune_mm"),
+    "extern_kernels.addmm": (".mm", "tune_mm"),
+    "extern_kernels.convolution": (".conv", "tune_conv"),
+    "extern_kernels.cudnn_convolution": (".conv", "tune_conv"),
 }
 
 
 def _lazy_registry() -> dict[str, Callable]:
     """Build the registry with lazy imports."""
-    import importlib
 
     reg: dict[str, Callable] = {}
     for key, (module_path, attr) in _TUNER_MODULES.items():
         try:
-            mod = importlib.import_module(module_path)
+            mod = importlib.import_module(module_path, package=__package__)
             reg[key] = getattr(mod, attr)
         except (ImportError, AttributeError):
             pass

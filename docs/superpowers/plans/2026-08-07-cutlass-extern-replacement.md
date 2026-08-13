@@ -92,6 +92,7 @@ mkdir -p hyperonnx/compile/cutlass_kernels
 ```python
 # hyperonnx/compile/cutlass_kernels/config.py
 """CUTLASS autotuning configuration grid."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -100,6 +101,7 @@ from dataclasses import asdict, dataclass
 @dataclass(frozen=True)
 class CutlassConfig:
     """One CUTLASS kernel tile configuration."""
+
     tile_m: int
     tile_n: int
     tile_k: int
@@ -146,7 +148,11 @@ CONV_CONFIGS: list[CutlassConfig] = [
 
 ```python
 # tests/compile/test_cutlass_config.py
-from hyperonnx.compile.cutlass_kernels.config import CutlassConfig, MM_CONFIGS, CONV_CONFIGS
+from hyperonnx.compile.cutlass_kernels.config import (
+    CutlassConfig,
+    MM_CONFIGS,
+    CONV_CONFIGS,
+)
 
 
 def test_cutlass_config_roundtrip():
@@ -200,12 +206,14 @@ git commit -m "[dev] add CutlassConfig dataclass and predefined config grids"
 ```python
 # tests/compile/test_cutlass_extract.py
 """Tests for cubin extraction and GPU detection."""
+
 import pytest
 
 
 def test_detect_gpu_arch_format():
     """detect_gpu_arch returns sm_XX format or raises if no GPU."""
     from hyperonnx.compile.cutlass_kernels.extract import detect_gpu_arch
+
     try:
         arch = detect_gpu_arch()
         assert arch.startswith("sm_")
@@ -224,6 +232,7 @@ Expected: FAIL (module not found)
 ```python
 # hyperonnx/compile/cutlass_kernels/extract.py
 """Cubin extraction from CuTe DSL compiled output and GPU detection."""
+
 from __future__ import annotations
 
 import importlib
@@ -238,6 +247,7 @@ def detect_gpu_arch() -> str:
     """
     try:
         import torch
+
         if torch.cuda.is_available():
             cap = torch.cuda.get_device_capability()
             return f"sm_{cap[0]}{cap[1]}"
@@ -309,6 +319,7 @@ def _extract_fatbin(obj_bytes: bytes, arch: str) -> bytes:
     #   magic: u32, version: u16, header_size: u16, size: u64,
     #   unknown: u32, num_elf_offsets: u32, unknown2: u64
     import struct
+
     pos = idx
     magic, version, header_size, size_lo, size_hi = struct.unpack_from(
         "<IHHII", obj_bytes, pos
@@ -350,11 +361,13 @@ git commit -m "[dev] add cubin extraction and GPU auto-detection"
 ```python
 # tests/compile/test_cutlass_registry.py
 """Tests for the CUTLASS kernel registry."""
+
 import pytest
 
 
 def test_registry_contains_mm():
     from hyperonnx.compile.cutlass_kernels import REGISTRY
+
     assert "extern_kernels.mm" in REGISTRY
     assert "extern_kernels.bmm" in REGISTRY
     assert "extern_kernels.addmm" in REGISTRY
@@ -362,18 +375,21 @@ def test_registry_contains_mm():
 
 def test_registry_contains_conv():
     from hyperonnx.compile.cutlass_kernels import REGISTRY
+
     assert "extern_kernels.convolution" in REGISTRY
     assert "extern_kernels.cudnn_convolution" in REGISTRY
 
 
 def test_get_generator_known():
     from hyperonnx.compile.cutlass_kernels import get_generator
+
     gen = get_generator("extern_kernels.mm")
     assert callable(gen)
 
 
 def test_get_generator_unknown():
     from hyperonnx.compile.cutlass_kernels import get_generator
+
     gen = get_generator("extern_kernels.some_new_op")
     assert gen is None
 ```
@@ -392,6 +408,7 @@ Expected: FAIL (no REGISTRY yet)
 Registry maps extern_kernel names to CuTe DSL generator functions.
 Each generator returns (cubin_bytes, config, launch_descriptor).
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
@@ -405,14 +422,21 @@ _GENERATOR_MODULES: dict[str, tuple[str, str]] = {
     "extern_kernels.mm": ("hyperonnx.compile.cutlass_kernels.mm", "generate_mm"),
     "extern_kernels.bmm": ("hyperonnx.compile.cutlass_kernels.mm", "generate_bmm"),
     "extern_kernels.addmm": ("hyperonnx.compile.cutlass_kernels.mm", "generate_addmm"),
-    "extern_kernels.convolution": ("hyperonnx.compile.cutlass_kernels.conv", "generate_conv"),
-    "extern_kernels.cudnn_convolution": ("hyperonnx.compile.cutlass_kernels.conv", "generate_conv"),
+    "extern_kernels.convolution": (
+        "hyperonnx.compile.cutlass_kernels.conv",
+        "generate_conv",
+    ),
+    "extern_kernels.cudnn_convolution": (
+        "hyperonnx.compile.cutlass_kernels.conv",
+        "generate_conv",
+    ),
 }
 
 
 def _lazy_registry() -> dict[str, Callable]:
     """Build the registry with lazy imports."""
     import importlib
+
     reg: dict[str, Callable] = {}
     for key, (module_path, attr) in _GENERATOR_MODULES.items():
         mod = importlib.import_module(module_path)
@@ -438,6 +462,7 @@ def require_cutlass():
     """Import and return cutlass.cute, raising if unavailable."""
     try:
         import cutlass.cute as cute
+
         return cute
     except ImportError:
         raise RuntimeError(
@@ -477,6 +502,7 @@ git commit -m "[dev] add CUTLASS kernel registry with lazy dispatch"
 Benchmarks multiple tile configurations on the target GPU using CUDA events
 for timing. No PyTorch dependency — pure CUDA Driver API.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -573,8 +599,17 @@ def autotune_kernel(
         # Warmup
         for _ in range(warmup):
             drv.cuLaunchKernel(
-                func, grid[0], grid[1], grid[2],
-                block_x, 1, 1, shared, stream, kernel_params, 0,
+                func,
+                grid[0],
+                grid[1],
+                grid[2],
+                block_x,
+                1,
+                1,
+                shared,
+                stream,
+                kernel_params,
+                0,
             )
         drv.cuStreamSynchronize(stream)
 
@@ -582,8 +617,17 @@ def autotune_kernel(
         drv.cuEventRecord(start_event, stream)
         for _ in range(iterations):
             drv.cuLaunchKernel(
-                func, grid[0], grid[1], grid[2],
-                block_x, 1, 1, shared, stream, kernel_params, 0,
+                func,
+                grid[0],
+                grid[1],
+                grid[2],
+                block_x,
+                1,
+                1,
+                shared,
+                stream,
+                kernel_params,
+                0,
             )
         drv.cuEventRecord(end_event, stream)
 
@@ -628,6 +672,7 @@ git commit -m "[dev] add CUTLASS autotuning harness with CUDA event timing"
 ```python
 # hyperonnx/compile/cutlass_kernels/mm.py
 """CuTe DSL GEMM kernel generators for mm, bmm, addmm."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -721,7 +766,10 @@ def generate_mm(
             generate_fn=lambda a, o, b, ar, config, autotune: _compile_mm_with_config(
                 cute, M, N, K, dtype, ar, config
             ),
-            args=args, output=output, buffers=buffers, arch=arch,
+            args=args,
+            output=output,
+            buffers=buffers,
+            arch=arch,
             configs=MM_CONFIGS,
         )
     else:
@@ -750,8 +798,12 @@ def _compile_mm(
 
     @cute.kernel
     def cutlass_kernel(
-        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor,
-        M: int, N: int, K: int,
+        A: cute.Tensor,
+        B: cute.Tensor,
+        C: cute.Tensor,
+        M: int,
+        N: int,
+        K: int,
     ):
         # CuTe DSL tiled GEMM using the config's tile sizes
         from cutlass.cute.arch import smem_arrive, smem_fence
@@ -760,7 +812,9 @@ def _compile_mm(
 
         # Build MMA atom for the target arch
         mma_atom = MmaAtom("SM90_16x8x16_F16F16F16F16_TN")
-        tiled_mma = TiledMma(mma_atom, layout=(config.tile_m, config.tile_n, config.tile_k))
+        tiled_mma = TiledMma(
+            mma_atom, layout=(config.tile_m, config.tile_n, config.tile_k)
+        )
 
         # Build copy atoms for global -> shared memory
         copy_a = CopyAtom("SM90_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>")
@@ -786,8 +840,14 @@ def _compile_mm(
         # Pipeline stages for shared memory
         for k_tile in range(0, K, config.tile_k):
             # Load A and B tiles to shared memory
-            tiled_copy_a(A[m_offset:m_offset+config.tile_m, k_tile:k_tile+config.tile_k], smem_a)
-            tiled_copy_b(B[k_tile:k_tile+config.tile_k, n_offset:n_offset+config.tile_n], smem_b)
+            tiled_copy_a(
+                A[m_offset : m_offset + config.tile_m, k_tile : k_tile + config.tile_k],
+                smem_a,
+            )
+            tiled_copy_b(
+                B[k_tile : k_tile + config.tile_k, n_offset : n_offset + config.tile_n],
+                smem_b,
+            )
             smem_fence()
             smem_arrive()
 
@@ -795,11 +855,15 @@ def _compile_mm(
             tiled_mma(smem_a, smem_b, acc)
 
         # Store result
-        C_tile = C[m_offset:m_offset+config.tile_m, n_offset:n_offset+config.tile_n]
+        C_tile = C[
+            m_offset : m_offset + config.tile_m, n_offset : n_offset + config.tile_n
+        ]
         cute.copy(acc, C_tile)
 
     @cute.jit
-    def matmul_jit(A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, stream: cute.cuda.CUstream):
+    def matmul_jit(
+        A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, stream: cute.cuda.CUstream
+    ):
         grid_x = (M + config.tile_m - 1) // config.tile_m
         grid_y = (N + config.tile_n - 1) // config.tile_n
         cutlass_kernel(A, B, C, M, N, K).launch(
@@ -809,7 +873,9 @@ def _compile_mm(
         )
 
     # Compile
-    compiled = cute.compile(matmul_jit, *dummy_args, stream=0, options=f"--gpu-arch {arch}")
+    compiled = cute.compile(
+        matmul_jit, *dummy_args, stream=0, options=f"--gpu-arch {arch}"
+    )
     cubin_bytes = extract_cubin(compiled, arch)
 
     grid_x = (M + config.tile_m - 1) // config.tile_m
@@ -887,6 +953,7 @@ git commit -m "[dev] add CuTe DSL GEMM kernel generators (mm, bmm, addmm)"
 ```python
 # hyperonnx/compile/cutlass_kernels/conv.py
 """CuTe DSL convolution kernel generator."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -894,9 +961,7 @@ from typing import Any
 from .config import CONV_CONFIGS, CutlassConfig
 
 
-def _extract_conv_shapes(
-    args: list[dict], buffers: dict
-) -> dict[str, Any]:
+def _extract_conv_shapes(args: list[dict], buffers: dict) -> dict[str, Any]:
     """Extract convolution parameters from manifest args.
 
     Typical extern_kernels.convolution args:
@@ -923,7 +988,7 @@ def _extract_conv_shapes(
     if len(tensor_args) < 2:
         raise ValueError(f"Expected >=2 tensor args for conv, got {len(tensor_args)}")
 
-    input_shape = _shape_of(tensor_args[0])   # (N, C, H, W)
+    input_shape = _shape_of(tensor_args[0])  # (N, C, H, W)
     weight_shape = _shape_of(tensor_args[1])  # (K, C, R, S)
 
     return {
@@ -963,7 +1028,10 @@ def generate_conv(
             generate_fn=lambda a, o, b, ar, config, autotune: _compile_conv_with_config(
                 params, ar, config
             ),
-            args=args, output=output, buffers=buffers, arch=arch,
+            args=args,
+            output=output,
+            buffers=buffers,
+            arch=arch,
             configs=CONV_CONFIGS,
         )
     else:
@@ -1040,6 +1108,7 @@ Reads manifest.json from a bundle directory, replaces eligible extern_kernel
 steps with cutlass_kernel steps carrying compiled cubin payloads.
 Idempotent: running twice produces the same result.
 """
+
 from __future__ import annotations
 
 import json
@@ -1095,7 +1164,9 @@ def replace_extern_with_cutlass(
                 continue
 
             kernel_name = step.get("kernel", "")
-            op_short = kernel_name.rsplit(".", 1)[-1] if "." in kernel_name else kernel_name
+            op_short = (
+                kernel_name.rsplit(".", 1)[-1] if "." in kernel_name else kernel_name
+            )
 
             if op_filter and op_short not in op_filter:
                 continue
@@ -1111,7 +1182,13 @@ def replace_extern_with_cutlass(
 
             try:
                 cutlass_step = _replace_one_step(
-                    step, generator, bundle_dir, arch, autotune, cubin_idx, graph.get("buffers", {})
+                    step,
+                    generator,
+                    bundle_dir,
+                    arch,
+                    autotune,
+                    cubin_idx,
+                    graph.get("buffers", {}),
                 )
                 steps[i] = cutlass_step
                 cubin_idx += 1
@@ -1143,7 +1220,12 @@ def _replace_one_step(
     output = extern_step.get("output", {})
 
     cubin_bytes, config, launch = generator(
-        args, output, buffers, arch, config=None, autotune=autotune,
+        args,
+        output,
+        buffers,
+        arch,
+        config=None,
+        autotune=autotune,
     )
 
     cubin_filename = f"cutlass_kernel_{cubin_idx:04d}.cubin"
@@ -1199,6 +1281,7 @@ def _next_cubin_index(bundle_dir: Path) -> int:
 Usage:
     python -m hyperonnx.compile.cutlass_bundle <bundle_dir> [--arch sm_90] [--no-autotune]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -1211,10 +1294,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Replace extern_kernel steps with CUTLASS cubins"
     )
-    parser.add_argument("bundle_dir", type=Path, help="Path to .kernels/ bundle directory")
+    parser.add_argument(
+        "bundle_dir", type=Path, help="Path to .kernels/ bundle directory"
+    )
     parser.add_argument("--arch", type=str, default=None, help="GPU arch (e.g. sm_90)")
     parser.add_argument("--no-autotune", action="store_true", help="Skip autotuning")
-    parser.add_argument("--ops", type=str, default=None, help="Comma-separated op filter (e.g. mm,convolution)")
+    parser.add_argument(
+        "--ops",
+        type=str,
+        default=None,
+        help="Comma-separated op filter (e.g. mm,convolution)",
+    )
     args = parser.parse_args()
 
     if not args.bundle_dir.is_dir():
@@ -1229,6 +1319,7 @@ def main() -> None:
     op_filter = set(args.ops.split(",")) if args.ops else None
 
     from .cutlass import replace_extern_with_cutlass
+
     result = replace_extern_with_cutlass(
         args.bundle_dir,
         arch=args.arch,
@@ -1454,25 +1545,26 @@ def _collect_and_attach_kernels(
 After `write_kernel_bundle(...)` at line 428-437, add:
 
 ```python
-        write_kernel_bundle(
-            directory=out_dir,
-            type_name=type_name,
-            kernels=sink.kernels,
-            module_io=module_io,
-            module_meta=module_meta,
-            launch_trace=trace,
-            wrapper_text=wrapper_text,
-            wrapper_graph=wrapper_graph,
-        )
+write_kernel_bundle(
+    directory=out_dir,
+    type_name=type_name,
+    kernels=sink.kernels,
+    module_io=module_io,
+    module_meta=module_meta,
+    launch_trace=trace,
+    wrapper_text=wrapper_text,
+    wrapper_graph=wrapper_graph,
+)
 
-        # CUTLASS replacement pass
-        if cutlass_replace:
-            try:
-                from .cutlass import replace_extern_with_cutlass
-                bundle_dir = out_dir / legalize_path_name(f"{type_name}.kernels")
-                replace_extern_with_cutlass(bundle_dir, arch=cutlass_arch)
-            except Exception as exc:
-                logger.warning(f"CUTLASS replacement failed for {type_name}: {exc}")
+# CUTLASS replacement pass
+if cutlass_replace:
+    try:
+        from .cutlass import replace_extern_with_cutlass
+
+        bundle_dir = out_dir / legalize_path_name(f"{type_name}.kernels")
+        replace_extern_with_cutlass(bundle_dir, arch=cutlass_arch)
+    except Exception as exc:
+        logger.warning(f"CUTLASS replacement failed for {type_name}: {exc}")
 ```
 
 - [ ] **Step 3: Pass cutlass params from export_hyper_onnx to _collect_and_attach_kernels**
@@ -1519,6 +1611,7 @@ git commit -m "[dev] add cutlass_replace parameter to export_hyper_onnx"
 ```python
 # tests/compile/test_cutlass_e2e.py
 """End-to-end test for CUTLASS extern kernel replacement."""
+
 import json
 import pytest
 import torch
@@ -1527,6 +1620,7 @@ _HAS_CUTLASS = False
 try:
     from hyperonnx.compile.cutlass_kernels import get_generator
     from hyperonnx.compile.cutlass import replace_extern_with_cutlass
+
     _HAS_CUTLASS = True
 except Exception:
     pass
@@ -1546,22 +1640,39 @@ def test_replace_mm_step(tmp_path):
         "schema_version": 2,
         "module": {"type_name": "Test"},
         "io": {"inputs": [], "outputs": []},
-        "pipeline": [{
-            "graph": None,
-            "buffers": {
-                "arg0_1": {"buffer_id": 0, "kind": "input", "dtype": "float16", "shape": [128, 256]},
-                "arg1_1": {"buffer_id": 1, "kind": "input", "dtype": "float16", "shape": [256, 64]},
-                "buf0": {"buffer_id": 2, "kind": "output", "dtype": "float16", "shape": [128, 64]},
-            },
-            "steps": [
-                {
-                    "type": "extern_kernel",
-                    "kernel": "extern_kernels.mm",
-                    "args": ["arg0_1", "arg1_1"],
-                    "output": "buf0",
+        "pipeline": [
+            {
+                "graph": None,
+                "buffers": {
+                    "arg0_1": {
+                        "buffer_id": 0,
+                        "kind": "input",
+                        "dtype": "float16",
+                        "shape": [128, 256],
+                    },
+                    "arg1_1": {
+                        "buffer_id": 1,
+                        "kind": "input",
+                        "dtype": "float16",
+                        "shape": [256, 64],
+                    },
+                    "buf0": {
+                        "buffer_id": 2,
+                        "kind": "output",
+                        "dtype": "float16",
+                        "shape": [128, 64],
+                    },
                 },
-            ],
-        }],
+                "steps": [
+                    {
+                        "type": "extern_kernel",
+                        "kernel": "extern_kernels.mm",
+                        "args": ["arg0_1", "arg1_1"],
+                        "output": "buf0",
+                    },
+                ],
+            }
+        ],
         "buffers": [
             {"id": 0, "kind": "input", "dtype": "float16", "shape": [128, 256]},
             {"id": 1, "kind": "input", "dtype": "float16", "shape": [256, 64]},
@@ -1571,7 +1682,9 @@ def test_replace_mm_step(tmp_path):
     (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
     # Replace
-    result_path = replace_extern_with_cutlass(bundle_dir, manifest=manifest, autotune=False)
+    result_path = replace_extern_with_cutlass(
+        bundle_dir, manifest=manifest, autotune=False
+    )
 
     # Verify
     updated = json.loads(result_path.read_text())
@@ -1601,22 +1714,39 @@ def test_idempotent(tmp_path):
         "schema_version": 2,
         "module": {"type_name": "Test"},
         "io": {"inputs": [], "outputs": []},
-        "pipeline": [{
-            "graph": None,
-            "buffers": {
-                "arg0_1": {"buffer_id": 0, "kind": "input", "dtype": "float16", "shape": [64, 64]},
-                "arg1_1": {"buffer_id": 1, "kind": "input", "dtype": "float16", "shape": [64, 64]},
-                "buf0": {"buffer_id": 2, "kind": "output", "dtype": "float16", "shape": [64, 64]},
-            },
-            "steps": [
-                {
-                    "type": "extern_kernel",
-                    "kernel": "extern_kernels.mm",
-                    "args": ["arg0_1", "arg1_1"],
-                    "output": "buf0",
+        "pipeline": [
+            {
+                "graph": None,
+                "buffers": {
+                    "arg0_1": {
+                        "buffer_id": 0,
+                        "kind": "input",
+                        "dtype": "float16",
+                        "shape": [64, 64],
+                    },
+                    "arg1_1": {
+                        "buffer_id": 1,
+                        "kind": "input",
+                        "dtype": "float16",
+                        "shape": [64, 64],
+                    },
+                    "buf0": {
+                        "buffer_id": 2,
+                        "kind": "output",
+                        "dtype": "float16",
+                        "shape": [64, 64],
+                    },
                 },
-            ],
-        }],
+                "steps": [
+                    {
+                        "type": "extern_kernel",
+                        "kernel": "extern_kernels.mm",
+                        "args": ["arg0_1", "arg1_1"],
+                        "output": "buf0",
+                    },
+                ],
+            }
+        ],
         "buffers": [],
     }
     (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -1641,11 +1771,21 @@ def test_no_extern_kernels(tmp_path):
         "schema_version": 2,
         "module": {"type_name": "Test"},
         "io": {"inputs": [], "outputs": []},
-        "pipeline": [{
-            "graph": None,
-            "buffers": {},
-            "steps": [{"type": "allocate", "buffer": "buf0", "shape": [10], "stride": [1], "dtype": "float32"}],
-        }],
+        "pipeline": [
+            {
+                "graph": None,
+                "buffers": {},
+                "steps": [
+                    {
+                        "type": "allocate",
+                        "buffer": "buf0",
+                        "shape": [10],
+                        "stride": [1],
+                        "dtype": "float32",
+                    }
+                ],
+            }
+        ],
         "buffers": [],
     }
     (bundle_dir / "manifest.json").write_text(json.dumps(manifest))

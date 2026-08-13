@@ -17,8 +17,6 @@ CUTLASS convolution config tuner.
 Only tunes and returns the best config — no cubin export.
 """
 
-from __future__ import annotations
-
 from .config import CONV_CONFIGS, CutlassConfig
 from .mm import tune_mm
 

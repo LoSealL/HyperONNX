@@ -298,14 +298,23 @@ def _line_type_name(line: Any) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _coerce_dim(s: Any) -> int | str:
+    """Coerce a sympy/int shape dim to ``int``; fall back to ``str`` for
+    symbolic dims (dynamic shapes) that can't evaluate."""
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return str(s)
+
+
 def _serialize_buffer(buf: Any) -> dict | None:
     """Best-effort shape/dtype/stride extraction from an inductor IR buffer."""
     if buf is None:
         return None
     out: dict[str, Any] = {}
     for key, getter, fmt in (
-        ("shape", buf.get_size, str),
-        ("stride", buf.get_stride, str),
+        ("shape", buf.get_size, _coerce_dim),
+        ("stride", buf.get_stride, _coerce_dim),
         ("dtype", buf.get_dtype, lambda d: str(d).replace("torch.", "")),
     ):
         try:
@@ -668,6 +677,21 @@ class LaunchTraceSink:
         self._ptr_to_buf[data_ptr] = buf
         self.buffers.append(buf)
         self._next_id += 1
+
+    def buffer_id_of(self, tensor: Any) -> int | None:
+        """Return the registered ``buffer_id`` for ``tensor``'s data_ptr.
+
+        ``None`` when the pointer was never seen by the trace (e.g. a
+        CPU tensor or an eager output never passed to a kernel). This is
+        the reliable name-agnostic link between a manifest io entry and a
+        ``buffers[]`` entry — buffer order is creation-order and need not
+        match io order, so positional/shape matching would be ambiguous.
+        """
+        ptr = getattr(tensor, "data_ptr", lambda: None)()
+        if ptr is None:
+            return None
+        buf = self._ptr_to_buf.get(ptr)
+        return buf.buffer_id if buf is not None else None
 
     def identify_output(self, output: Any) -> None:
         """Mark the buffer backing ``output`` as kind ``"output"``.

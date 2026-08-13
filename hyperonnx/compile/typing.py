@@ -183,6 +183,15 @@ class KernelBundleManifest(TypedDict):
     schema_version: int
     module: dict
     io: dict
+    """``{"inputs": [entry, ...], "outputs": [entry, ...]}`` mirroring the
+    ONNX function signature, in declaration order. Each entry is
+    ``{"name", "dtype", "shape"}`` plus an optional ``buffer_id`` linking
+    it unambiguously to a :class:`BufferEntry` in ``buffers[]``. The link
+    is by data_ptr (captured at launch-trace time), not position:
+    ``buffers[]`` is creation-order (params → inputs → intermediates →
+    outputs) and need not match io order, so positional matching would be
+    ambiguous. ``buffer_id`` is absent when the tensor was never sighted
+    by the trace (e.g. a CPU-only or eager-only value)."""
     pipeline: list[dict]
     """The execution pipeline, one entry per codegened graph:
     ``{"graph": name, "buffers": {...}, "steps": [...]}``. Always present.

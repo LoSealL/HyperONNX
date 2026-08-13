@@ -181,3 +181,12 @@ def extract_grid_constants(src) -> dict[str, int]:
         elif isinstance(idx, str):
             out[idx] = val
     return out
+
+
+def config():
+    """Return the torch._inductor.config module."""
+    try:
+        import torch._inductor.config as cfg
+    except ImportError:
+        raise _missing_inductor_error("config")
+    return cfg

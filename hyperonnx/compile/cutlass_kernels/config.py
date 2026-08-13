@@ -16,8 +16,6 @@ limitations under the License.
 CUTLASS autotuning configuration grid.
 """
 
-from __future__ import annotations
-
 from dataclasses import asdict, dataclass
 
 
@@ -35,7 +33,7 @@ class CutlassConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> CutlassConfig:
+    def from_dict(cls, d: dict) -> "CutlassConfig":
         return cls(
             tile_m=d["tile_m"],
             tile_n=d["tile_n"],

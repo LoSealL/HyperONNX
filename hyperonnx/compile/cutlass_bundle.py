@@ -4,8 +4,6 @@ Usage:
     python -m hyperonnx.compile.cutlass_bundle <bundle_dir> [--arch sm_90]
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

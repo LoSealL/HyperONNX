@@ -16,8 +16,6 @@ limitations under the License.
 GPU auto-detection for CUTLASS tuning.
 """
 
-from __future__ import annotations
-
 import importlib
 
 

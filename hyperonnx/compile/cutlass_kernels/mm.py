@@ -17,9 +17,11 @@ CUTLASS GEMM config tuner using CuTe DSL.
 Only tunes and returns the best config — no cubin export.
 """
 
-from __future__ import annotations
-
+import cutlass.cute as cute
+import cutlass.cute.arch as cute_arch
 import torch
+from cutlass.cute import Float16, Float32, Int32
+from cutlass.cute.runtime import make_fake_tensor
 
 from .config import MM_CONFIGS, CutlassConfig
 
@@ -50,6 +52,12 @@ def _extract_matmul_shapes(
 
     shape_a = _shape_of(tensor_args[0])
     shape_b = _shape_of(tensor_args[1])
+
+    # addmm(bias, mat1, mat2): a 1D leading arg is the bias — skip it so the
+    # next two tensors (mat1, mat2) are treated as the GEMM operands.
+    if len(shape_a) == 1 and len(tensor_args) >= 3:
+        shape_a = _shape_of(tensor_args[1])
+        shape_b = _shape_of(tensor_args[2])
 
     if len(shape_a) == 2:
         M, K = shape_a
@@ -82,10 +90,6 @@ def _compile_and_bench_mm(
     iters: int = 20,
 ) -> float:
     """Compile a tiled GEMM with CuTe DSL and benchmark it. Returns avg ms."""
-    import cutlass.cute as cute
-    import cutlass.cute.arch as cute_arch
-    from cutlass.cute import Float16, Float32, Int32
-    from cutlass.cute.runtime import make_fake_tensor
 
     tile_m = config.tile_m
     tile_n = config.tile_n

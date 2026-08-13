@@ -41,6 +41,8 @@ cuda = [
     "torchvision",
     "triton-windows; sys_platform == 'win32'",
     "cuda-python>=12.9.4",
+    "nvidia-cutlass>=4.2.0.0",
+    "nvidia-cutlass-dsl; sys_platform == 'linux'",
 ]
 xpu = ["torch", "torchvision", "pytorch-triton-xpu"]
 test-torch210-tf560 = [
@@ -62,7 +64,6 @@ test-torch213-tf513 = [
 dev = [
     "mypy",
     "nvidia-cudnn-frontend>=1.26.0",
-    "nvidia-cutlass>=4.2.0.0",
     "onnxruntime",
     "pre-commit",
     "pyright<=1.1.408",

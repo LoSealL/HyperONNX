@@ -61,6 +61,7 @@ For simple custom operations that do not need hierarchical module wrapping:
 import torch
 from torch.onnx import register_custom_op_symbolic
 
+
 # Step 1: Define a symbolic function for ONNX
 def symbolic_my_op(g, input, param):
     """ONNX symbolic for my_op.
@@ -73,16 +74,17 @@ def symbolic_my_op(g, input, param):
     Returns:
         ONNX operator node(s).
     """
-    return g.op('custom_domain::MyOp', input, param_f=param)
+    return g.op("custom_domain::MyOp", input, param_f=param)
+
 
 # Step 2: Register the symbolic before export
-register_custom_op_symbolic('custom_domain::my_op', symbolic_my_op, opset_version=18)
+register_custom_op_symbolic("custom_domain::my_op", symbolic_my_op, opset_version=18)
 
 # Step 3: Export with dynamo=False
 torch.onnx.export(
     model,
     example_inputs,
-    'model.onnx',
+    "model.onnx",
     opset_version=18,
     dynamo=False,
 )
@@ -101,11 +103,14 @@ For complex models where the custom operation is itself a module that needs hier
 import torch
 from hyperonnx import export_hyper_onnx
 
+
 class MyCustomModule(torch.nn.Module):
     """A module that implements custom logic."""
+
     def forward(self, x):
         # Custom computation
         return x * 2 + 1
+
 
 model = torch.nn.Sequential(
     torch.nn.Linear(10, 20),
@@ -116,7 +121,7 @@ model = torch.nn.Sequential(
 export_hyper_onnx(
     model,
     (torch.randn(1, 10),),
-    'model.onnx',
+    "model.onnx",
     hiera=[MyCustomModule],  # Export MyCustomModule as a function
     dynamo=False,
     opset_version=18,
@@ -145,7 +150,7 @@ register_attention_opsets()
 torch.onnx.export(
     model,
     example_inputs,
-    'model.onnx',
+    "model.onnx",
     opset_version=24,
     dynamo=False,
 )

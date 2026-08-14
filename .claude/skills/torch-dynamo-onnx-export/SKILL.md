@@ -93,9 +93,11 @@ import torch
 # Step 1: Define an onnxscript function
 _MY_OPSET = onnxscript.values.Opset("custom_domain", 1)
 
+
 @onnxscript.script(_MY_OPSET)
 def my_custom_op(x: onnxscript.FLOAT) -> onnxscript.FLOAT:
     return x * 2.0 + 1.0
+
 
 # Step 2: Build custom_translation_table
 custom_translation_table = {
@@ -106,7 +108,7 @@ custom_translation_table = {
 torch.onnx.export(
     model,
     example_inputs,
-    'model.onnx',
+    "model.onnx",
     dynamo=True,
     custom_translation_table=custom_translation_table,
     opset_version=18,
@@ -126,12 +128,15 @@ For complex modules that need hierarchical export, use `replace_with_custom_op` 
 import torch
 from hyperonnx import export_hyper_onnx
 
+
 class MyCustomModule(torch.nn.Module):
     """A complex module with loops or dynamic shapes."""
+
     def forward(self, x):
         for i in range(x.shape[0]):
             x = x * 2
         return x
+
 
 model = torch.nn.Sequential(
     torch.nn.Linear(10, 20),
@@ -142,9 +147,9 @@ model = torch.nn.Sequential(
 export_hyper_onnx(
     model,
     (torch.randn(1, 10),),
-    'model.onnx',
+    "model.onnx",
     hiera=[MyCustomModule],  # Export as hierarchical function
-    dynamo=True,             # Use torch.export, not TorchScript
+    dynamo=True,  # Use torch.export, not TorchScript
     opset_version=18,
 )
 ```
@@ -172,7 +177,7 @@ translation_table = attention_translation_table()
 torch.onnx.export(
     model,
     example_inputs,
-    'model.onnx',
+    "model.onnx",
     opset_version=24,
     dynamo=True,
     custom_translation_table=translation_table,
@@ -189,12 +194,12 @@ For selective torch.compile with cubin sidecar:
 export_hyper_onnx(
     model,
     args,
-    'model.onnx',
-    compile=[Attention],              # auto-promoted into hiera
-    compile_static_grid=True,         # skip AST extraction for fixed shapes
+    "model.onnx",
+    compile=[Attention],  # auto-promoted into hiera
+    compile_static_grid=True,  # skip AST extraction for fixed shapes
     dynamo=True,
-    external_data=True,               # required for kernel bundle
-    external_directory="out/",        # required for kernel bundle
+    external_data=True,  # required for kernel bundle
+    external_directory="out/",  # required for kernel bundle
 )
 ```
 
@@ -242,10 +247,12 @@ import onnxscript
 # Define a custom opset
 CUSTOM_OPSET = onnxscript.values.Opset(domain="my_domain", version=1)
 
+
 @onnxscript.script(CUSTOM_OPSET)
 def my_complex_op(x: onnxscript.FLOAT, mask: onnxscript.BOOL) -> onnxscript.FLOAT:
     """Custom operator that applies masking."""
     return x * mask.cast(onnxscript.FLOAT)
+
 
 # Use in translation table
 custom_translation_table = {
@@ -317,7 +324,7 @@ with replace_with_custom_op(model, module_spec) as custom_translation_table:
     torch.onnx.export(
         model,
         example_inputs,
-        'model.onnx',
+        "model.onnx",
         dynamo=True,
         custom_translation_table=custom_translation_table,
         opset_version=18,
@@ -330,13 +337,13 @@ with replace_with_custom_op(model, module_spec) as custom_translation_table:
 torch.onnx.export(
     model,
     example_inputs,
-    'model.onnx',
-    input_names=['input'],
-    output_names=['output'],
+    "model.onnx",
+    input_names=["input"],
+    output_names=["output"],
     opset_version=18,
     dynamo=True,
     custom_translation_table=custom_translation_table,
-    dynamic_shapes={'input': {0: 'batch_size'}},  # Optional: specify dynamic shapes
+    dynamic_shapes={"input": {0: "batch_size"}},  # Optional: specify dynamic shapes
 )
 ```
 
@@ -357,7 +364,7 @@ from hyperonnx.hyper_export import export_hyper_onnx
 export_hyper_onnx(
     model,
     args,
-    'model.onnx',
+    "model.onnx",
     dynamo=True,
     # If dynamo export fails, HyperONNX may retry with dynamo=False
 )
@@ -381,7 +388,7 @@ torch.onnx.export(
 import onnx
 
 # Load and check
-onnx_model = onnx.load('model.onnx')
+onnx_model = onnx.load("model.onnx")
 onnx.checker.check_model(onnx_model, full_check=True)
 
 # Verify custom operators appear

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import ast
 import os
 from collections.abc import Collection, Container, Mapping, Sequence
 from contextlib import suppress
@@ -34,7 +35,14 @@ from torch import Tensor
 from torch.nn import Module
 
 from .compile.bundle import write_kernel_bundle
-from .compile.capture import capture_compiled_kernels
+from .compile.capture import (
+    LaunchTraceSink,
+    attach_grid_exprs,
+    capture_compiled_kernels,
+    capture_launch_trace,
+    capture_wrapper_lines,
+)
+from .compile.inductor import config, triton_version
 from .exporter import replace_with_duck_module
 from .exporter.utils import detach_module_outputs, plain_tensor_container
 from .function_rewriter import (
@@ -263,18 +271,18 @@ def _export_hiera(
         # WA[torch ~2.5]: jit trace for some of modules may offer wrong inputs, hence
         # they won't follow input_names perfectly. We should replace this strict logic
         # by comparing the number of inputs.
-        unused_inputs = set(module_input_names).difference(
-            [i.name for i in onnx_model.graph.input]
-        )
+        unused_inputs = set(module_input_names).difference([
+            i.name for i in onnx_model.graph.input
+        ])
         if len(unused_inputs) != len(module_input_names) - len(onnx_model.graph.input):
             # Do not assign it, let fallback logic in `ComposeOnnxAsFunctionRewriter`
             # to determine unused inputs automatically (but unsafe).
             unused_inputs.clear()
         unused_outputs = ()
         if module_output_names:
-            unused_outputs = set(module_output_names).difference(
-                [i.name for i in onnx_model.graph.output]
-            )
+            unused_outputs = set(module_output_names).difference([
+                i.name for i in onnx_model.graph.output
+            ])
         base_dir = None
         if isinstance(model_path, Path):
             base_dir = model_path.parent.as_posix()
@@ -314,16 +322,18 @@ def _export_hiera(
 
 def _collect_and_attach_kernels(
     model: Module,
-    compile: Collection[type[Module]],
+    compile_hier: Collection[type[Module]],
     module_spec: dict[Module, ModuleSpec],
     external_directory: str | PathLike | None,
     compile_static_grid: bool,
     logger: Logger,
+    cutlass_tune: bool = False,
+    cutlass_arch: str | None = None,
 ):
     """Run ``torch.compile`` per marked module and attach kernel bundles.
 
     Iterates over ``model.modules()`` and, for every module whose type is in
-    ``compile`` and whose spec has already reached ``EXPORTED`` state,
+    ``compile_hier`` and whose spec has already reached ``EXPORTED`` state,
     re-runs the module under ``torch.compile`` inside a
     :func:`capture_compiled_kernels` context. Captured kernels are written
     to a sibling ``<type_name>.kernels/`` bundle via
@@ -336,15 +346,19 @@ def _collect_and_attach_kernels(
 
     Args:
         model: the top-level model being exported.
-        compile: module types selected for kernel capture; same matching
-            rule as ``hiera`` (``type(child) in compile``).
+        compile_hier: module types selected for kernel capture; same matching
+            rule as ``hiera`` (``type(child) in compile_hier``).
         module_spec: shared spec dict from :func:`trace_module_spec`.
         external_directory: where to drop the bundle; when ``None`` the
             whole step is skipped with a warning (kernels cannot be
             inlined into the ONNX file).
-        compile_static_grid: forwarded to the capture context; when
-            ``True``, grid-AST extraction is bypassed.
+        compile_static_grid: when ``True``, skip :func:`attach_grid_exprs`
+            and leave ``launch.grid_expr`` null for every captured kernel.
         logger: nested logger from :func:`hyper_export`.
+        cutlass_tune: when ``True``, run :func:`annotate_cutlass_config`
+            on each kernel bundle after writing.
+        cutlass_arch: SM architecture string passed to the CUTLASS replacement
+            (e.g. ``"sm90"``). ``None`` uses the CUTLASS default.
     """
     if not hasattr(torch, "compile"):
         raise RuntimeError(
@@ -356,41 +370,71 @@ def _collect_and_attach_kernels(
     out_dir = Path(external_directory)
 
     for module in model.modules():
-        if type(module) not in compile:
+        if type(module) not in compile_hier:
             continue
         spec = module_spec.get(module)
         if spec is None or spec.get("status") != ExportStatus.EXPORTED:
             continue
+        wrapper_text = None
         with (
             TemporaryDirectory(prefix="hyperonnx_inductor_") as cache_dir,
-            capture_compiled_kernels(static_grid=compile_static_grid) as sink,
+            capture_compiled_kernels() as sink,
+            capture_launch_trace(module, spec["args"], spec.get("kwargs")) as trace,
+            capture_wrapper_lines() as wrapper_graph,
+            # Disable thread pool to make sure listener can be triggered
+            config().patch(compile_threads=1),
         ):
             orig_cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
             try:
-                compiled = torch.compile(module)
-                compiled(*spec["args"], **(spec.get("kwargs") or {}))
+                # Identical-shape sibling modules share one code object and
+                # hit dynamo's in-memory cache (guards only check shapes) —
+                # the second block then compiles nothing, the triton
+                # listener never fires, and its bundle would be silently
+                # empty. Reset per module to force a real compile.
+                torch._dynamo.reset()
+                with torch.inference_mode():
+                    compiled = torch.compile(module)
+                    # TODO: what if output is not a tensor?
+                    output = compiled(*spec["args"], **(spec.get("kwargs") or {}))
+                    trace.identify_output(output)
             finally:
                 if orig_cache_dir is None:
                     os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
                 else:
                     os.environ["TORCHINDUCTOR_CACHE_DIR"] = orig_cache_dir
+            # The structured wrapper graph (execution order, triton↔extern
+            # interleaving) comes from capture_wrapper_lines — no source
+            # parsing. The raw def call() source is always kept as a debug
+            # artifact; gaps only drive the vendor_lib manifest marker.
+            gaps = trace.vendor_lib_gaps()
+            wrapper_text = _extract_inductor_wrapper(Path(cache_dir))
+        if not compile_static_grid:
+            attach_grid_exprs(sink, wrapper_graph)
+        type_name = spec["type_name"]
         if not sink.kernels:
             logger.warning(
-                f"no kernels captured for {type(module).__name__}; "
-                "module may be fully eager."
+                f"no kernels captured for {type_name}; module may be fully eager."
             )
             continue
-        type_name = spec["type_name"]
+        if gaps:
+            logger.warning(
+                f"partial triton capture for {type_name}: "
+                f"{len(gaps)} buffer(s) produced by a vendor library "
+                f"(cuDNN/cuBLAS, no cubin) — they appear as extern_kernel "
+                f"steps in the pipeline; affected ops stay in ONNX"
+            )
         module_meta = {
             "type_name": type_name,
             "python_class": f"{type(module).__module__}.{type(module).__qualname__}",
             "torch_version": torch.__version__,
-            "triton_version": _safe_triton_version(),
+            "triton_version": triton_version(),
         }
         module_io = {
-            "inputs": _spec_io(spec["args"], spec.get("kwargs", {}), spec["signature"]),
-            "outputs": _spec_io_from_output(spec.get("output")),
+            "inputs": _spec_io(
+                spec["args"], spec.get("kwargs", {}), spec["signature"], trace
+            ),
+            "outputs": _spec_io_from_output(output, trace),
         }
         write_kernel_bundle(
             directory=out_dir,
@@ -398,79 +442,121 @@ def _collect_and_attach_kernels(
             kernels=sink.kernels,
             module_io=module_io,
             module_meta=module_meta,
+            launch_trace=trace,
+            wrapper_text=wrapper_text,
+            wrapper_graph=wrapper_graph,
         )
 
+        if cutlass_tune:
+            try:
+                from hyperonnx.compile.cutlass import annotate_cutlass_config
 
-def _safe_triton_version() -> str:
-    """Return the installed triton version, or ``"unknown"`` on any failure.
+                bundle_dir = out_dir / legalize_path_name(f"{type_name}.kernels")
+                annotate_cutlass_config(bundle_dir, arch=cutlass_arch)
+            except Exception as exc:
+                logger.warning(f"CUTLASS tuning failed for {type_name}: {exc}")
 
-    Triton is an optional dependency (CPU/win32 installs omit it) and is
-    only needed for the compile-capture path. The string is purely
-    provenance for the manifest, so a missing import must never abort the
-    export.
+
+def _extract_inductor_wrapper(cache_dir: Path) -> str | None:
+    """Find and extract the ``def call()`` body from inductor's generated wrapper.
+
+    Inductor writes a ``.py`` wrapper per compiled graph into the cache dir.
+    The wrapper embeds triton kernel sources (redundant with cubins) plus a
+    ``def call(self, args):`` body that is the authoritative execution order —
+    showing how triton kernel launches and ``extern_kernels`` (cuDNN/cuBLAS)
+    calls interleave. This extracts just the ``call`` function via ``ast``.
     """
-    try:
-        import triton  # pyright: ignore[reportMissingImports]
+    for py_file in sorted(Path(cache_dir).rglob("*.py")):
+        try:
+            text = py_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "def call(" not in text:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "call":
+                segment = ast.get_source_segment(text, node)
+                if segment:
+                    return segment
+    return None
 
-        return triton.__version__
-    except Exception:
-        return "unknown"
 
-
-def _tensor_meta(name: str, t: Tensor) -> dict:
+def _tensor_meta(name: str, t: Tensor, trace: LaunchTraceSink | None = None) -> dict:
     """Serialise one tensor as a ``{name, dtype, shape}`` manifest entry.
 
     Shape is materialised as a plain list so downstream ``json.dumps`` of
     the manifest needs no custom encoder; dtype is normalised to drop the
-    ``torch.`` prefix (``"torch.float16"`` → ``"float16"``).
+    ``torch.`` prefix (``"torch.float16"`` → ``"float16"``). When ``trace``
+    is given, ``buffer_id`` is stamped by data_ptr so the io entry links
+    unambiguously to ``manifest["buffers"]`` (whose order is creation-order,
+    not io-order).
     """
-    return {
+    entry: dict = {
         "name": name,
         "dtype": str(t.dtype).replace("torch.", ""),
         "shape": list(t.shape),
     }
+    if trace is not None:
+        bid = trace.buffer_id_of(t)
+        if bid is not None:
+            entry["buffer_id"] = bid
+    return entry
 
 
-def _spec_io(args, kwargs, signature) -> list[dict]:
+def _spec_io(args, kwargs, sig, trace: LaunchTraceSink | None = None) -> list[dict]:
     """Build the manifest ``io.inputs`` list for one module's spec.
 
-    Walks the module's forward ``signature`` (skipping ``self``), pairing
+    Walks the module's forward ``sig`` (skipping ``self``), pairing
     positional ``args`` and any non-positional ``kwargs`` with their param
     names. Each tensor found is flattened via
     :func:`plain_tensor_container` and emitted through
     :func:`_tensor_meta`, preserving declaration order so the manifest
-    matches the ONNX function signature exactly.
+    matches the ONNX function sig exactly. When ``trace`` is given each
+    entry is stamped with ``buffer_id`` (resolved by data_ptr) so it links
+    unambiguously to ``manifest["buffers"]``.
     """
     out: list[dict] = []
-    params = list(signature.parameters.values())[1:]  # skip self
+    params = list(sig.parameters.values())
+    # signature() on the bound method already omits self; only drop it
+    # when present (e.g. signature captured from the unbound function).
+    if params and params[0].name == "self":
+        params = params[1:]
     # positional args
     for arg, param in zip(args, params):
-        out.extend(_tensor_meta(param.name, t) for t in plain_tensor_container(arg))
+        out.extend(
+            _tensor_meta(param.name, t, trace) for t in plain_tensor_container(arg)
+        )
     # kwargs not already covered positionally
     covered = {p.name for p in params[: len(args)]}
     for param in params[len(args) :]:
         if param.name in covered or param.name not in kwargs:
             continue
         out.extend(
-            _tensor_meta(param.name, t)
+            _tensor_meta(param.name, t, trace)
             for t in plain_tensor_container(kwargs[param.name])
         )
     return out
 
 
-def _spec_io_from_output(output) -> list[dict]:
+def _spec_io_from_output(output, trace: LaunchTraceSink | None = None) -> list[dict]:
     """Build the manifest ``io.outputs`` list from a module's traced output.
 
     Single-tensor outputs are named ``"output"``; multi-tensor outputs are
     indexed ``"output_0"``, ``"output_1"``, … mirroring the existing
-    ``_get_output_names`` convention used to label the ONNX graph.
+    ``_get_output_names`` convention used to label the ONNX graph. When
+    ``trace`` is given each entry is stamped with ``buffer_id`` (resolved
+    by data_ptr against the launch trace).
     """
     if output is None:
         return []
     tensors = plain_tensor_container(output)
     if len(tensors) <= 1:
-        return [_tensor_meta("output", t) for t in tensors]
-    return [_tensor_meta(f"output_{i}", t) for i, t in enumerate(tensors)]
+        return [_tensor_meta("output", t, trace) for t in tensors]
+    return [_tensor_meta(f"output_{i}", t, trace) for i, t in enumerate(tensors)]
 
 
 def export_hyper_onnx(  # noqa: C901
@@ -485,8 +571,10 @@ def export_hyper_onnx(  # noqa: C901
     dynamo: bool = False,
     external_data: bool = False,
     hiera: Collection[type[Module]] | None = None,
-    compile: Collection[type[Module]] | None = None,
+    compile_hier: Collection[type[Module]] | None = None,
     compile_static_grid: bool = False,
+    cutlass_tune: bool = False,
+    cutlass_arch: str | None = None,
     module_spec: dict[Module, ModuleSpec] | None = None,
     do_optimization: bool = True,
     fold_nodes_to_functions: bool = True,
@@ -520,13 +608,13 @@ def export_hyper_onnx(  # noqa: C901
             the model architecture.
         hiera (Optional[Collection[type[Module]]]): A container of types of module to be
             composed as a onnx function.
-        compile (Optional[Collection[type[Module]]]): A container of module types to
+        compile_hier (Optional[Collection[type[Module]]]): Module types to
             additionally run through ``torch.compile`` and capture as a kernel
-            bundle. ``compile`` is a strict subset of ``hiera``: any type in
-            ``compile`` but not ``hiera`` is auto-promoted. Each captured
+            bundle. ``compile_hier`` is a strict subset of ``hiera``: any type in
+            ``compile_hier`` but not ``hiera`` is auto-promoted. Each captured
             module produces a sibling ``<type_name>.kernels/`` directory next
             to its ONNX function body; deleting that directory yields a model
-            indistinguishable from one exported without ``compile``. Requires
+            indistinguishable from one exported without ``compile_hier``. Requires
             ``external_directory`` (kernels cannot be inlined into the ONNX).
         compile_static_grid (bool): When True, skip grid-AST extraction and
             leave ``launch.grid_expr`` null for every captured kernel. Use for
@@ -548,8 +636,14 @@ def export_hyper_onnx(  # noqa: C901
 
     model_typename = type(model).__name__
     logger = nest(model_typename)
-    if compile:
-        hiera = set(hiera or []) | set(compile)
+    # torch.onnx.export defaults to TrainingMode.TRAINING_MODE and flips
+    # the whole model to train during tracing; kernel capture must compile
+    # each module under the mode the caller actually set. The wrapper's
+    # own flag says nothing about submodules (an eval'd inner model inside
+    # a train-mode wrapper is common), so preserve per-module flags.
+    module_training_flags = {m: m.training for m in model.modules()}
+    if compile_hier:
+        hiera = set(hiera or []) | set(compile_hier)
     if _:
         ignored_params = "\n  ".join(_.keys())
         logger.warning(f"These arguments are ignored:\n  {ignored_params}")
@@ -615,14 +709,20 @@ def export_hyper_onnx(  # noqa: C901
         logger=logger,
     )
 
-    if compile:
+    if compile_hier:
+        # Undo any exporter-imposed mode flips before compiling (the
+        # captured BN semantics would otherwise silently be training-mode).
+        for m, flag in module_training_flags.items():
+            m.training = flag
         _collect_and_attach_kernels(
             model=model,
-            compile=compile,
+            compile_hier=compile_hier,
             module_spec=module_spec,
             external_directory=external_directory,
             compile_static_grid=compile_static_grid,
             logger=logger,
+            cutlass_tune=cutlass_tune,
+            cutlass_arch=cutlass_arch,
         )
 
     if model in module_spec:
@@ -663,7 +763,8 @@ def export_hyper_onnx(  # noqa: C901
     for node in onnx_model.graph.node:
         if node.op_type in typenames:
             node.domain = HYPER_DOMAIN  # add domain tag to run rewriter
-    graph = OnnxGraph(onnx_model)
+    base_dir = str(external_directory) if external_directory else None
+    graph = OnnxGraph(onnx_model, base_dir=base_dir)
     passes: list[Any]
     passes = [ComposeOnnxAsFunctionRewriter(HYPER_DOMAIN, tuple(module_spec.values()))]
     if do_optimization:

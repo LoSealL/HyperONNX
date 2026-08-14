@@ -160,6 +160,31 @@ def test_translate_nested_binops():
     assert ast[0]["b"]["op"] == "cdiv"
 
 
+def test_translate_inductor_ceildiv_trick():
+    """Inductor's python-mode ceildiv: -((xnumel) // -(512)) → cdiv."""
+    source = "return (-((xnumel) // -(512)), 1, 1)"
+    ast = translate_grid(source)
+    assert ast == [
+        {
+            "op": "cdiv",
+            "a": {"op": "meta", "key": "xnumel"},
+            "b": {"op": "const", "value": 512},
+        },
+        {"op": "const", "value": 1},
+        {"op": "const", "value": 1},
+    ]
+    assert evaluate_grid(ast, io_shapes={}, meta={"xnumel": 2000}) == [4, 1, 1]
+
+
+def test_translate_negative_const():
+    assert translate_grid("return (-3,)") == [{"op": "const", "value": -3}]
+
+
+def test_translate_unary_on_meta_raises():
+    with pytest.raises(NotTranslatable):
+        translate_grid("return (-M,)")
+
+
 # ---- evaluate_grid branches ------------------------------------------------
 
 

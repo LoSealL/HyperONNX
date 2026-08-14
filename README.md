@@ -135,8 +135,8 @@ export_hyper_onnx(
     (torch.randn(8, 768),),
     "model.onnx",
     hiera=[DecoderLayer, Attention],
-    compile=[Attention],            # Attention gets a kernel bundle
-    compile_static_grid=False,      # set True to skip grid AST extraction
+    compile=[Attention],  # Attention gets a kernel bundle
+    compile_static_grid=False,  # set True to skip grid AST extraction
     dynamo=True,
     external_data=True,
     external_directory="out/",

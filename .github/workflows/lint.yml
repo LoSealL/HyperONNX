@@ -32,7 +32,7 @@ jobs:
           node-version: lts/Jod
       - name: pyright type check
         run: |
-          uv sync --dev --extra=cpu
+          uv sync --dev --extra=cuda
           uv pip install 'transformers==${{ matrix.transformers-version }}'
           uv run pyright hyperonnx
           uv run pre-commit run -s HEAD^ -o HEAD

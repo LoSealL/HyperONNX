@@ -101,10 +101,7 @@ def _run_conv(
     stride = _norm2d(kwargs.get("stride", [1, 1]))
     padding = _norm2d(kwargs.get("padding", [0, 0]))
     dilation = _norm2d(kwargs.get("dilation", [1, 1]))
-    groups = kwargs.get("groups", 1)
-
-    if groups != 1:
-        raise NotImplementedError(f"grouped conv (groups={groups}) not supported")
+    groups = int(kwargs.get("groups", 1))
 
     N, C_in, H, W = x.shape
     K_out = weight.shape[0]
@@ -123,22 +120,50 @@ def _run_conv(
     )
     # col: (N, C_in*R*S, L)
 
-    weight_2d = weight.contiguous().view(K_out, -1)  # (K_out, C_in*R*S)
-
     cfg = CutlassConfig.from_dict(config)
     in_type, out_type = _torch_to_cute(x.dtype)
 
-    # GEMM: weight_2d (M=K_out, K=C_in*R*S) @ col[n] (K, N=L) → (K_out, L)
-    compiled = _get_compiled_gemm(K_out, L, C_in * R * S, arch, cfg, in_type, out_type)
-
-    out = torch.empty(N, K_out, L, dtype=x.dtype, device=x.device)
-    for n in range(N):
-        compiled(weight_2d, col[n], out[n], K_out, L, C_in * R * S)
+    if groups == 1:
+        weight_2d = weight.contiguous().view(K_out, -1)  # (K_out, C_in*R*S)
+        # GEMM: weight_2d (M=K_out, K=C_in*R*S) @ col[n] (K, N=L) → (K_out, L)
+        compiled = _get_compiled_gemm(
+            K_out, L, C_in * R * S, arch, cfg, in_type, out_type
+        )
+        out = torch.empty(N, K_out, L, dtype=x.dtype, device=x.device)
+        for n in range(N):
+            compiled(weight_2d, col[n], out[n], K_out, L, C_in * R * S)
+    else:
+        # Per-group GEMM: weight_g (K_g, C_in_g*R*S) @ col_g (C_in_g*R*S, L).
+        # All groups share dims → one compiled kernel from the cache.
+        # ponytail: one tiny GEMM launch per (batch, group) — depthwise costs
+        # C launches; a fused grouped kernel is the upgrade path if launch
+        # overhead ever matters.
+        C_in_g = C_in // groups
+        K_g = K_out // groups
+        Kk = C_in_g * R * S
+        w_g = weight.contiguous().view(groups, K_g, Kk)
+        col_g = col.view(N, groups, Kk, L)
+        compiled = _get_compiled_gemm(K_g, L, Kk, arch, cfg, in_type, out_type)
+        out = torch.empty(N, groups, K_g, L, dtype=x.dtype, device=x.device)
+        for n in range(N):
+            for g in range(groups):
+                compiled(w_g[g], col_g[n, g], out[n, g], K_g, L, Kk)
+        out = out.view(N, K_out, L)
 
     if bias is not None:
         out += bias.view(1, -1, 1)
 
-    return out.view(N, K_out, H_out, W_out)
+    # aten/cuDNN convolutions emit a C-major output for C-major inputs, and
+    # replay's write-back preserves the result's strides into the buffer
+    # storage — downstream readers were traced on that layout. Match by
+    # "C-axis stride == 1" so padded C-major views (traced layouts may pad)
+    # also count, not just canonical channels_last.
+    fmt = (
+        torch.channels_last
+        if x.dim() == 4 and x.stride(1) == 1
+        else torch.contiguous_format
+    )
+    return out.view(N, K_out, H_out, W_out).contiguous(memory_format=fmt)
 
 
 def run_cutlass_extern(

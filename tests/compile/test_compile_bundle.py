@@ -260,7 +260,16 @@ def test_finalize_pipeline_merges_and_validates():
         {"kind": "tensor", "name": "arg0_1", "buffer_id": 2},
         {"kind": "tensor", "name": "vbuf1", "buffer_id": None},
     ]
-    assert extern["output"] == {"name": "buf0", "buffer_id": 3, "direction": "out"}
+    # Output carries the table's layout (here from the allocate entry) so
+    # executors can materialize the buffer with the captured strides.
+    assert extern["output"] == {
+        "name": "buf0",
+        "buffer_id": 3,
+        "direction": "out",
+        "shape": ["1", "128"],
+        "stride": ["128", "1"],
+        "dtype": "float32",
+    }
 
     table = graph["buffers"]
     # input matched by (shape, dtype) to runtime buffer 2
@@ -286,6 +295,100 @@ def test_finalize_pipeline_flags_undefined_buffer():
     out = _finalize_pipeline([graph], _kernel_entries(), [])
     table = out[0]["buffers"]
     assert table["buf9"] == {"undefined": True}
+
+
+def test_extern_output_without_allocate_lands_in_table_with_layout():
+    """Extern steps that carry their output layout (serialized from the
+    output IR node) register the output name in the table — no allocate
+    line exists for aten-allocated outputs, so without this the name is
+    undefined in ``pipeline[].buffers`` and the layout contract is lost.
+
+    This is the matchstereo buf54 scenario: the extern conv output is read
+    channels-last by the next kernel, but the manifest had no table entry.
+    """
+    graph = {
+        "graph": "",
+        "buffers": {},
+        "steps": [
+            {
+                "type": "extern_kernel",
+                "kernel": "extern_kernels.convolution",
+                "output": "buf54",
+                "args": ["arg0_1"],
+                "kwargs": [],
+                "shape": [1, 240, 20, 25],
+                "stride": [12000, 1, 1000, 50],
+                "dtype": "float16",
+            },
+        ],
+    }
+    out = _finalize_pipeline([graph], [], [])
+    table = out[0]["buffers"]
+    assert table["buf54"]["kind"] == "extern_out"
+    assert table["buf54"]["shape"] == [1, 240, 20, 25]
+    assert table["buf54"]["stride"] == [12000, 1, 1000, 50]
+    assert table["buf54"]["dtype"] == "float16"
+    step = out[0]["steps"][0]
+    assert step["output"]["name"] == "buf54"
+    assert step["output"]["shape"] == [1, 240, 20, 25]
+    assert step["output"]["stride"] == [12000, 1, 1000, 50]
+
+
+def test_seeding_backfills_layout_from_launch_args():
+    """The consumer kernel's launch arg carries the runtime shape/stride the
+    compiled kernel actually indexes with. When the table entry for that
+    static name has no layout (e.g. an extern output never serialized with
+    one), seeding must backfill it so the layout contract reaches the
+    manifest."""
+    k = _fake_kernel("k0")
+    k["args"] = [
+        {
+            "kind": "tensor",
+            "buffer_id": 3,
+            "direction": "out",
+            "shape": [1, 240, 20, 25],
+            "stride": [12000, 1, 1000, 50],
+        },
+        {"kind": "scalar", "dtype": "int32", "value": 12000},
+    ]
+    entries: list = [
+        {
+            "id": "kernel_0000",
+            "cubin": "kernel_0000.cubin",
+            "symbol": "k0",
+            "device_target": k["device_target"],
+            "launch": k["launch"],
+            "args": k["args"],
+            "variants": [],
+        }
+    ]
+    graph = {
+        "graph": "",
+        "buffers": {
+            # buf54 exists but layout-free (older capture / failed
+            # serialization) — only the extern step registered the name.
+            "buf54": {"kind": "extern_out", "dtype": "float16"}
+        },
+        "steps": [
+            {
+                "type": "extern_kernel",
+                "kernel": "extern_kernels.convolution",
+                "output": "buf54",
+                "args": ["arg0_1"],
+                "kwargs": [],
+            },
+            {
+                "type": "triton_kernel",
+                "kernel": "k0",
+                "args": ["buf54", "12000"],
+                "grid_type": "Grid1D",
+            },
+        ],
+    }
+    out = _finalize_pipeline([graph], entries, [])
+    table = out[0]["buffers"]
+    assert table["buf54"]["shape"] == [1, 240, 20, 25]
+    assert table["buf54"]["stride"] == [12000, 1, 1000, 50]
 
 
 def test_finalize_pipeline_without_launch_trace():

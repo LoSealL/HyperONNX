@@ -16,11 +16,13 @@ from hyperonnx.compile.capture import (
     CaptureSink,
     LaunchTraceSink,
     _extract_target_from_metadata,
+    _serialize_wrapper_line,
     _storage_span,
     attach_grid_exprs,
     capture_compiled_kernels,
     extract_grid_value,
 )
+from hyperonnx.compile.inductor import wrapper_module
 
 triton = pytest.importorskip("triton")
 
@@ -380,3 +382,77 @@ def test_get_or_create_buffer_no_duplicate_buffer_entry():
     bid1 = sink.get_or_create_buffer(0x1000, "float32", (2, 4), (4, 1))
     assert bid0 == bid1
     assert len(sink.buffers) == 1
+
+
+def test_pre_register_records_stride():
+    """pre_register must pass stride through to BufferInfo — inputs with a
+    channels-last layout keep it in the registry (the arg was accepted but
+    silently dropped)."""
+    sink = LaunchTraceSink()
+    cl = (36, 1, 6, 6)  # channels-last for (1,6,6,6)
+    sink.pre_register(0x1000, "input", "float32", (1, 6, 6, 6), "x", cl)
+    assert sink.buffers[0].stride == cl
+
+
+def test_get_or_create_buffer_adopts_layout_on_equal_span_resight():
+    """Equal-span resight with a more informative layout upgrades the record.
+
+    The matchstereo bug: a conv output first sighted as a contiguous view
+    (span N) is later read channels-last by the consumer kernel (same span
+    N). The strict-growth rule never recorded the stride, so executors
+    materialized the buffer NCHW and fed the kernel wrong bytes.
+    """
+    sink = LaunchTraceSink()
+    shape = (1, 4, 6, 6)
+    row_major = (144, 36, 6, 1)
+    channels_last = (144, 1, 24, 4)
+    assert _storage_span(shape, row_major) == _storage_span(shape, channels_last)
+    sink.get_or_create_buffer(0x1000, "float32", shape, row_major)
+    sink.get_or_create_buffer(0x1000, "float32", shape, channels_last)
+    buf = sink.buffers[0]
+    assert buf.shape == shape
+    assert buf.stride == channels_last
+
+
+def test_get_or_create_buffer_adopts_layout_from_flat_contiguous_resight():
+    """A flat (N,) contiguous first sight also upgrades to a strided view."""
+    sink = LaunchTraceSink()
+    sink.get_or_create_buffer(0x1000, "float32", (144,), (1,))
+    sink.get_or_create_buffer(0x1000, "float32", (1, 4, 6, 6), (144, 1, 24, 4))
+    buf = sink.buffers[0]
+    assert buf.shape == (1, 4, 6, 6)
+    assert buf.stride == (144, 1, 24, 4)
+
+
+def test_get_or_create_buffer_keeps_informative_layout_on_equal_span():
+    """When the frozen layout is already non-contiguous, an equal-span
+    contiguous resight does not overwrite it (first informative sight wins)."""
+    sink = LaunchTraceSink()
+    shape = (1, 4, 6, 6)
+    sink.get_or_create_buffer(0x1000, "float32", shape, (144, 1, 24, 4))
+    sink.get_or_create_buffer(0x1000, "float32", shape, (144, 36, 6, 1))
+    assert sink.buffers[0].stride == (144, 1, 24, 4)
+
+
+def test_serialize_extern_line_carries_output_layout():
+    """Extern steps must serialize the output IR buffer's shape/stride/dtype
+    so the manifest records the extern output's layout contract (e.g. a
+    channels-last conv output) even before any kernel consumes it."""
+    wc = wrapper_module()
+    line = wc.ExternKernelAllocLine.__new__(wc.ExternKernelAllocLine)
+    line.node = SimpleNamespace(
+        get_kernel_name=lambda: "extern_kernels.convolution",
+        get_name=lambda: "buf54",
+        codegen_args=lambda: ["buf53"],
+        codegen_kwargs=lambda: [],
+        get_size=lambda: ["1", "240", "20", "25"],
+        get_stride=lambda: ["12000", "1", "1000", "50"],
+        get_dtype=lambda: "torch.float16",
+    )
+    step = _serialize_wrapper_line(line)
+    assert step is not None
+    assert step["type"] == "extern_kernel"
+    assert step["output"] == "buf54"
+    assert step["shape"] == [1, 240, 20, 25]
+    assert step["stride"] == [12000, 1, 1000, 50]
+    assert step["dtype"] == "float16"

@@ -125,7 +125,7 @@ def build_onnxscript(spec: ModuleSpec) -> onnxscript.OnnxFunction:
         if len(return_types) == 1:
             annotations["return"] = return_types[0]
         else:
-            annotations["return"] = tuple[*return_types]  # type: ignore
+            annotations["return"] = tuple[tuple(return_types)]  # type: ignore
         setattr(
             onnx_fn,
             "__signature__",

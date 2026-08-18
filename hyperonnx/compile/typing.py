@@ -22,9 +22,11 @@ design doc). They are intentionally plain ``TypedDict``\\s rather than dataclass
 so that ``json.dumps``/``json.loads`` round-trips require no adapter layer.
 """
 
-from typing import NotRequired, TypedDict
+from typing import TypeAlias
 
-type GridAstNode = dict
+from typing_extensions import NotRequired, TypedDict
+
+GridAstNode: TypeAlias = dict
 """A single translated grid-AST node (see ``grid_ast.translate_grid``).
 
 The runtime-implemented op set is documented in the design doc's
@@ -33,7 +35,7 @@ The runtime-implemented op set is documented in the design doc's
 varies per ``op``.
 """
 
-type GridLiteral = tuple[int, ...] | list[int] | None
+GridLiteral: TypeAlias = tuple[int, ...] | list[int] | None
 """A concrete grid value captured at export time.
 
 ``None`` means the grid was not captured (v1 default for ``captured_grid``).

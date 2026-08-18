@@ -19,15 +19,16 @@ from collections.abc import Callable
 from enum import Enum
 from inspect import Signature
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import TypeAlias
 
 from onnx import ModelProto
 from torch import Tensor
 from torch.nn import Module
 from torch.utils.hooks import RemovableHandle
+from typing_extensions import NotRequired, TypedDict
 
-type AnyTensor = Tensor | tuple["AnyTensor", ...] | dict[str, "AnyTensor"]
-type HookCallback = Callable[
+AnyTensor: TypeAlias = Tensor | tuple["AnyTensor", ...] | dict[str, "AnyTensor"]
+HookCallback: TypeAlias = Callable[
     [Module, tuple[Tensor], dict[str, AnyTensor], AnyTensor], None
 ]
 

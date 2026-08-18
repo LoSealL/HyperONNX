@@ -11,7 +11,7 @@ jobs:
     runs-on: [ubuntu-latest]
     strategy:
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.10", "3.12"]
         extra: [test-torch210-tf560, test-torch213-tf513]
     steps:
       - uses: actions/checkout@v6

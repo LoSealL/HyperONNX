@@ -342,8 +342,11 @@ def gated_delta_rule(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
     use_qk_l2norm_in_kernel: bool = True,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Chunked Gated Delta Rule function"""
+    # Static batch=1 export: varlen packing (cu_seqlens) is not supported.
+    assert cu_seqlens is None, "varlen (cu_seqlens) export is not supported"
     del chunk_size, output_final_state
     if initial_state is None:
         initial_state = torch.zeros(

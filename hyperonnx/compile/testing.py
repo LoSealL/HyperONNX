@@ -358,14 +358,25 @@ def replay(
                 args.append(a["value"])
         kwargs = _parse_extern_kwargs(step.get("kwargs", []))
         config = step.get("cutlass_config")
-        use_cutlass = cutlass and bool(config)
+        bench = step.get("cutlass_bench") or {}
+        # ``cutlass_config`` always holds the best CUTLASS config; the cuBLAS
+        # bench record decides which kernel runs. With no bench (legacy
+        # manifest) fall back to aten.
+        use_cutlass = cutlass and bool(config) and bench.get("winner") == "cutlass"
+        result = None
         if use_cutlass:
             from .cutlass_kernels.run import run_cutlass_extern
 
             debug(f"extern_kernel {op_name} → cutlass")
             assert config is not None and arch is not None
-            result = run_cutlass_extern(op_name, args, config, arch, kwargs=kwargs)
-        else:
+            try:
+                result = run_cutlass_extern(op_name, args, config, arch, kwargs=kwargs)
+                # CuTe DSL launches may not share torch's stream ordering;
+                # the result is read back via torch copy_ below.
+                torch.cuda.synchronize()
+            except NotImplementedError as exc:
+                debug(f"extern_kernel {op_name} cutlass unsupported ({exc}); → aten")
+        if result is None:
             debug(f"extern_kernel {op_name} → aten")
             op = getattr(torch.ops.aten, op_name)
             result = op(*args, **kwargs)
@@ -389,6 +400,13 @@ def replay(
                     meta, hint_name = cand, cand_name
                     break
         layout = name_layout_hint.get(hint_name)
+        # Step's own output layout (serialized layout contract) before the
+        # table fallback — covers manifests whose table entry lacks layout.
+        if layout is None:
+            out_shape = step["output"].get("shape")
+            out_stride = step["output"].get("stride")
+            if out_shape and out_stride and len(out_shape) == len(result.shape):
+                layout = ([int(s) for s in out_shape], [int(s) for s in out_stride])
         if layout is None and meta.get("shape") and meta.get("stride"):
             layout = ([int(s) for s in meta["shape"]], [int(s) for s in meta["stride"]])
         # Manifest buffer stride as last-resort layout source.

@@ -291,6 +291,20 @@ def _storage_span(shape: tuple[int, ...], stride: tuple[int, ...]) -> int:
     return n
 
 
+def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
+    """True when ``stride`` is empty or exactly row-major for ``shape``."""
+    if not stride:
+        return True
+    if len(stride) != len(shape):
+        return False
+    acc = 1
+    expect = [0] * len(shape)
+    for i in range(len(shape) - 1, -1, -1):
+        expect[i] = acc
+        acc *= int(shape[i])
+    return tuple(int(s) for s in stride) == tuple(expect)
+
+
 def _line_type_name(line: Any) -> str:
     """``KernelCallLine`` → ``kernel_call``; ``AllocateLine`` → ``allocate``."""
     name = type(line).__name__
@@ -410,6 +424,12 @@ def _serialize_wrapper_line(line: Any) -> dict | None:
             step["output"] = node.get_name()
             step["args"] = _json_safe(list(node.codegen_args()))
             step["kwargs"] = _json_safe(list(node.codegen_kwargs()))
+            # Output layout contract: extern outputs (aten-allocated, no
+            # allocate line) must carry shape/stride/dtype in the manifest
+            # or downstream consumers' layout expectations are lost.
+            meta = _serialize_buffer(node)
+            if meta:
+                step.update(meta)
         except Exception:  # pylint: disable=broad-except
             step["detail"] = repr(node)
         return step
@@ -629,7 +649,10 @@ class LaunchTraceSink:
         with a *larger* storage span (e.g. the full allocation is passed to
         a kernel after an earlier smaller view was seen). In that case the
         recorded layout grows to cover the larger span so the registry
-        reflects the true allocation size.
+        reflects the true allocation size. An equal-span resight also
+        upgrades the layout when the frozen one was layout-free (empty or
+        row-major) and the resight carries real strides (e.g. a
+        channels-last conv output first sighted as a flat view).
         """
         if data_ptr not in self._ptr_to_buf:
             buf = BufferInfo(
@@ -645,7 +668,18 @@ class LaunchTraceSink:
             self._next_id += 1
             return buf.buffer_id
         buf = self._ptr_to_buf[data_ptr]
-        if _storage_span(shape, stride) > _storage_span(buf.shape, buf.stride):
+        new_span = _storage_span(shape, stride)
+        old_span = _storage_span(buf.shape, buf.stride)
+        if new_span > old_span or (
+            new_span == old_span
+            and stride
+            and not _is_contiguous(shape, stride)
+            and _is_contiguous(buf.shape, buf.stride)
+        ):
+            # Equal-span upgrade: the frozen layout carried no layout
+            # information (empty/row-major — same span as any view of the
+            # storage), while the resight does (e.g. channels-last). Adopt
+            # it so the registry records the layout kernels index with.
             buf.shape = shape
             buf.stride = stride
         return buf.buffer_id
@@ -671,6 +705,7 @@ class LaunchTraceSink:
             kind=kind,
             dtype=dtype,
             shape=tuple(shape),
+            stride=tuple(stride),
             name=name,
             buffer_id=self._next_id,
         )

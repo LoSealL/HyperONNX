@@ -329,11 +329,16 @@ def _finalize_extern_step(step: dict, table: dict[str, dict]) -> None:
             if meta.get("alias_of") == out_name or meta.get("view_of") == out_name:
                 out_meta = meta
                 break
-    step["output"] = {
+    out_desc: dict = {
         "name": out_name,
         "buffer_id": (out_meta or {}).get("buffer_id"),
         "direction": "out",
     }
+    if out_meta:
+        for key in ("shape", "stride", "dtype"):
+            if key in out_meta:
+                out_desc[key] = out_meta[key]
+    step["output"] = out_desc
 
 
 def _finalize_as_strided_step(step: dict, table: dict[str, dict]) -> None:
@@ -449,6 +454,16 @@ def _finalize_pipeline(
             if stype == "extern_kernel":
                 views, vbuf_seq = _hoist_reinterpret_views(step, table, vbuf_seq)
                 kept.extend(views)
+                # Extern outputs have no allocate line (aten allocates
+                # internally); register the name from the step's serialized
+                # layout so the table (and executors) know the contract.
+                out_name = step.get("output")
+                existing = table.get(out_name) if isinstance(out_name, str) else None
+                if existing is None or existing.get("undefined"):
+                    meta = {
+                        k: step[k] for k in ("shape", "stride", "dtype") if k in step
+                    }
+                    table[out_name] = {**meta, "kind": "extern_out"}
             if stype == "triton_kernel":
                 entry = symbol_to_entry.get(step["kernel"])
                 step["_static_args"] = step.pop("args")
@@ -493,6 +508,14 @@ def _finalize_pipeline(
                     if "buffer_id" not in meta:
                         meta["buffer_id"] = ka_bid
                         rt_claimed.add(ka_bid)
+                    # Backfill layout from the runtime launch arg — the
+                    # strides the compiled kernel actually indexes with
+                    # (e.g. a channels-last extern conv output) are more
+                    # authoritative than a layout-free table entry.
+                    ka_shape, ka_stride = ka.get("shape"), ka.get("stride")
+                    if ka_shape and ka_stride and not meta.get("stride"):
+                        meta["shape"] = list(ka_shape)
+                        meta["stride"] = list(ka_stride)
 
         # Alias/view pairs share storage: propagate buffer_id bidirectionally.
         for name, meta in table.items():

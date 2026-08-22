@@ -153,6 +153,10 @@ class BufferEntry(TypedDict):
     ``kind`` discriminates: ``input`` (user-provided at replay),
     ``parameter`` (loaded from ``file``), ``intermediate`` (zeroed),
     ``output`` (produced by the kernel sequence).
+
+    To rebuild a linear contiguous buffer from a strided entry: allocate
+    ``span = sum((shape[i]-1) * stride[i]) + 1`` elements, view it with
+    ``as_strided(shape, stride)``, then ``contiguous()`` the view.
     """
 
     id: int
@@ -162,7 +166,8 @@ class BufferEntry(TypedDict):
     stride: NotRequired[list[int]]
     """Memory layout at capture time (element strides). Compiled kernels
     bake this layout into their indexing, so replay must allocate with
-    the same strides (e.g. channels_last conv activations)."""
+    the same strides (e.g. channels_last conv activations). Absent means
+    row-major contiguous for ``shape``."""
     name: NotRequired[str]
     file: NotRequired[str]
 
@@ -198,11 +203,23 @@ class KernelBundleManifest(TypedDict):
 
     ``buffers`` is the definition table for every buffer name the steps
     reference — graph inputs (``kind="input"``), allocations
-    (``kind="allocate"``, with shape/stride/dtype) and storage aliases
-    (``alias_of``); entries are cross-validated against ``buffers[]`` and
-    carry ``buffer_id`` on match. Allocator reuse can map one name to
-    different runtime ids across steps; the per-step ``args`` ids stay
-    authoritative.
+    (``kind="allocate"``, with shape/stride/dtype), storage aliases
+    (``alias_of``) and storage views (``view_of``, see below); entries are
+    cross-validated against ``buffers[]`` and carry ``buffer_id`` on match.
+    Allocator reuse can map one name to different runtime ids across steps;
+    the per-step ``args`` ids stay authoritative.
+
+    Extern-kernel outputs register as ``kind="extern_out"`` with the
+    output's shape/stride/dtype (aten allocates them internally, so no
+    ``allocate`` step exists) — the layout contract downstream kernels'
+    indexing implies.
+
+    View resolution rule: a ``view_of`` (or ``reinterpret_of``) entry adds
+    no storage of its own — follow the chain to the base entry, summing
+    each hop's ``offset`` (elements), then read/write through the base's
+    ``buffer_id`` storage at that accumulated offset. Same rule for
+    ``as_strided`` steps whose ``output.buffer_id`` is null.
+
     ``steps`` are execution-ordered and noise-free
     (asserts/guards/comments/frees stripped): ``allocate``,
     ``triton_kernel`` (kernel launch payload inlined),
@@ -210,7 +227,9 @@ class KernelBundleManifest(TypedDict):
     (hoisted ``reinterpret_tensor`` layout transforms). Both kernel step
     kinds share one schema: ``args`` as :class:`KernelArgDescriptor`\\s
     — tensor args carry both ``name`` (static buffer symbol) and
-    ``buffer_id`` (runtime index) — plus ``output`` of the same shape.
+    ``buffer_id`` (runtime index) — plus ``output`` of the same shape
+    (also carrying the output's shape/stride when known, so a linear
+    buffer can be rebuilt per the :class:`BufferEntry` stride note).
     Captured from ``PythonWrapperCodegen.lines`` before stringification
     by ``capture_wrapper_lines`` — no source parsing involved.
     """

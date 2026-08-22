@@ -358,7 +358,11 @@ def replay(
                 args.append(a["value"])
         kwargs = _parse_extern_kwargs(step.get("kwargs", []))
         config = step.get("cutlass_config")
-        use_cutlass = cutlass and bool(config)
+        bench = step.get("cutlass_bench") or {}
+        # ``cutlass_config`` always holds the best CUTLASS config; the cuBLAS
+        # bench record decides which kernel runs. With no bench (legacy
+        # manifest) fall back to aten.
+        use_cutlass = cutlass and bool(config) and bench.get("winner") == "cutlass"
         result = None
         if use_cutlass:
             from .cutlass_kernels.run import run_cutlass_extern

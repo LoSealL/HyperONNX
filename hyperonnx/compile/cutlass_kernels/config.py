@@ -28,6 +28,15 @@ class CutlassConfig:
     tile_k: int
     num_stages: int
     num_warps: int
+    naive: bool = False
+
+    @property
+    def m_warps(self) -> int:
+        return max(1, self.num_warps // 2)
+
+    @property
+    def n_warps(self) -> int:
+        return max(1, self.num_warps // self.m_warps)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -40,19 +49,24 @@ class CutlassConfig:
             tile_k=d["tile_k"],
             num_stages=d["num_stages"],
             num_warps=d["num_warps"],
+            naive=d.get("naive", False),
         )
 
 
 MM_CONFIGS: list[CutlassConfig] = [
-    CutlassConfig(128, 256, 64, 3, 4),
-    CutlassConfig(64, 128, 32, 2, 2),
-    CutlassConfig(256, 128, 64, 4, 4),
+    CutlassConfig(128, 128, 32, 4, 4),
     CutlassConfig(128, 128, 64, 3, 4),
-    CutlassConfig(64, 64, 32, 2, 2),
-    CutlassConfig(128, 64, 32, 2, 2),
+    CutlassConfig(128, 256, 32, 4, 8),
+    CutlassConfig(128, 256, 32, 3, 8),
+    CutlassConfig(128, 128, 32, 3, 4),
+    CutlassConfig(128, 128, 32, 4, 8),
 ]
 
 CONV_CONFIGS: list[CutlassConfig] = [
-    CutlassConfig(128, 128, 8, 2, 4),
-    CutlassConfig(64, 64, 8, 2, 2),
+    CutlassConfig(128, 128, 32, 3, 4),
+    CutlassConfig(128, 256, 32, 3, 8),
 ]
+
+# Fallback config kept in the manifest when no tiled CUTLASS kernel can run
+# (fp32, unaligned shapes). The bench record still documents cuBLAS winning.
+NAIVE_CONFIG = CutlassConfig(32, 32, 8, 1, 1, naive=True)

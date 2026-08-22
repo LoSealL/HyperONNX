@@ -28,8 +28,8 @@ if not torch.cuda.is_available():
 CONFIG = {
     "tile_m": 128,
     "tile_n": 128,
-    "tile_k": 8,
-    "num_stages": 2,
+    "tile_k": 32,
+    "num_stages": 3,
     "num_warps": 4,
 }
 

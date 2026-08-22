@@ -25,11 +25,12 @@ same GEMM path.
 
 from typing import Any
 
+import cuda.bindings.driver as _cuda_drv
 import torch
 from cutlass.cute import Float16, Float32
 
 from .config import CutlassConfig
-from .mm import _compile_gemm
+from .mm import compile_tiled_gemm
 
 _CUTLASS_RUNNER_OPS = frozenset({
     "mm",
@@ -64,22 +65,47 @@ def _get_compiled_gemm(
     cfg: CutlassConfig,
     in_type,
     out_type,
-):
-    """Return a cached compiled GEMM for the given dimensions + config.
+) -> Any:
+    """Return a cached GEMM runner callable as ``fn(a2d, b2d, c2d)``.
 
-    ponytail: block dims capped at 32 to stay within CUDA's 1024
-    threads-per-block limit. A real tiled GEMM would use the config's
-    tile_m/tile_n for cooperative tile sizes, not raw thread count.
+    Only the tiled tensor-core kernel; replay routes here only for
+    winner="cutlass" configs, i.e. shapes that passed eligibility at tuning.
     """
-    block_m = min(cfg.tile_m, 32)
-    block_n = min(cfg.tile_n, 32)
     dtype_key = "fp16" if in_type is Float16 else "fp32"
-    key = (M, N, K, arch, block_m, block_n, dtype_key)
-    compiled = _compiled_cache.get(key)
-    if compiled is None:
-        compiled = _compile_gemm(M, N, K, arch, block_m, block_n, in_type, out_type)
-        _compiled_cache[key] = compiled
-    return compiled
+    key = (
+        M,
+        N,
+        K,
+        arch,
+        cfg.tile_m,
+        cfg.tile_n,
+        cfg.tile_k,
+        max(cfg.num_stages, 3),
+        cfg.num_warps,
+        dtype_key,
+    )
+    cached: Any = _compiled_cache.get(key)
+    if cached is not None:
+        return cached
+
+    compiled = compile_tiled_gemm(
+        M,
+        N,
+        K,
+        arch,
+        cfg.tile_m,
+        cfg.tile_n,
+        cfg.tile_k,
+        max(cfg.num_stages, 3),
+        cfg.num_warps,
+    )
+
+    def runner(a, b, c):
+        stream = _cuda_drv.CUstream(torch.cuda.current_stream().cuda_stream)
+        compiled(a.view(1, M, K), b.view(1, K, N), c.view(1, M, N), stream)
+
+    _compiled_cache[key] = runner
+    return runner
 
 
 def _run_conv(
@@ -126,12 +152,12 @@ def _run_conv(
     if groups == 1:
         weight_2d = weight.contiguous().view(K_out, -1)  # (K_out, C_in*R*S)
         # GEMM: weight_2d (M=K_out, K=C_in*R*S) @ col[n] (K, N=L) → (K_out, L)
-        compiled = _get_compiled_gemm(
+        runner = _get_compiled_gemm(
             K_out, L, C_in * R * S, arch, cfg, in_type, out_type
         )
         out = torch.empty(N, K_out, L, dtype=x.dtype, device=x.device)
         for n in range(N):
-            compiled(weight_2d, col[n], out[n], K_out, L, C_in * R * S)
+            runner(weight_2d, col[n], out[n])
     else:
         # Per-group GEMM: weight_g (K_g, C_in_g*R*S) @ col_g (C_in_g*R*S, L).
         # All groups share dims → one compiled kernel from the cache.
@@ -143,11 +169,11 @@ def _run_conv(
         Kk = C_in_g * R * S
         w_g = weight.contiguous().view(groups, K_g, Kk)
         col_g = col.view(N, groups, Kk, L)
-        compiled = _get_compiled_gemm(K_g, L, Kk, arch, cfg, in_type, out_type)
+        runner = _get_compiled_gemm(K_g, L, Kk, arch, cfg, in_type, out_type)
         out = torch.empty(N, groups, K_g, L, dtype=x.dtype, device=x.device)
         for n in range(N):
             for g in range(groups):
-                compiled(w_g[g], col_g[n, g], out[n, g], K_g, L, Kk)
+                runner(w_g[g], col_g[n, g], out[n, g])
         out = out.view(N, K_out, L)
 
     if bias is not None:
@@ -213,20 +239,20 @@ def run_cutlass_extern(
     if a.dim() == 2:
         M, K = a.shape
         N = b.shape[1]
-        compiled = _get_compiled_gemm(M, N, K, arch, cfg, in_type, out_type)
+        runner = _get_compiled_gemm(M, N, K, arch, cfg, in_type, out_type)
         c = torch.empty(M, N, dtype=a.dtype, device=a.device)
-        compiled(a, b, c, M, N, K)
+        runner(a, b, c)
     else:
         batch_shape = a.shape[:-2]
         M, K = a.shape[-2:]
         N = b.shape[-1]
-        compiled = _get_compiled_gemm(M, N, K, arch, cfg, in_type, out_type)
+        runner = _get_compiled_gemm(M, N, K, arch, cfg, in_type, out_type)
         c = torch.empty(*batch_shape, M, N, dtype=a.dtype, device=a.device)
         a_3d = a.reshape(-1, M, K)
         b_3d = b.reshape(-1, K, N)
         c_3d = c.reshape(-1, M, N)
         for i in range(a_3d.shape[0]):
-            compiled(a_3d[i], b_3d[i], c_3d[i], M, N, K)
+            runner(a_3d[i], b_3d[i], c_3d[i])
 
     if op_name == "addmm":
         c = c + args[0]

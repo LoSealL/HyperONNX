@@ -83,10 +83,11 @@ def tune_conv(
     buffers: dict,
     arch: str,
     configs: list[CutlassConfig] | None = None,
-) -> CutlassConfig:
-    """Autotune convolution configs and return the best one.
+) -> tuple[CutlassConfig | None, dict]:
+    """Autotune convolution configs against the cuDNN/cuBLAS baseline.
 
-    Delegates to tune_mm with im2col-expanded shapes.
+    Delegates to tune_mm with im2col-expanded shapes; returns
+    ``(None, bench)`` when the vendor library is faster (the common case).
     """
     gemm_args = _conv_to_gemm_args(args, buffers)
     return tune_mm(gemm_args, buffers, arch, configs or CONV_CONFIGS)

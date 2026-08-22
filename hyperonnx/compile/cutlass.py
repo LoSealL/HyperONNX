@@ -99,7 +99,7 @@ def annotate_cutlass_config(
             if op_filter and op_short not in op_filter:
                 continue
 
-            # Idempotency: skip already-tuned steps
+            # Idempotency: skip already-tuned steps (null counts as tuned)
             if "cutlass_config" in step:
                 continue
 
@@ -110,16 +110,25 @@ def annotate_cutlass_config(
 
             try:
                 args = step.get("args", [])
-                config = tuner(args, buffers, arch)
+                config, bench = tuner(args, buffers, arch)
+                # ``cutlass_config`` always carries the best CUTLASS config
+                # (a naive fallback when none is eligible). ``cutlass_bench``
+                # records cuBLAS vs CUTLASS timings and ``winner``; the runner
+                # picks the kernel from ``winner`` at replay time.
                 step["cutlass_config"] = config.to_dict()
-                tuned += 1
+                step["cutlass_bench"] = bench
+                if not config.naive:
+                    tuned += 1
             except Exception as exc:
                 warning(f"CUTLASS tuning failed for {kernel_name}: {exc}")
                 continue
 
     if tuned > 0:
         manifest_path.write_text(json.dumps(manifest, indent=2))
-        info(f"annotated {tuned} extern_kernel step(s) with CUTLASS config")
+        info(
+            f"annotated {tuned} extern_kernel step(s) with CUTLASS config "
+            f"(loser steps keep their cuBLAS/cuDNN call, see cutlass_bench)"
+        )
     else:
         debug("no extern_kernel steps annotated")
 

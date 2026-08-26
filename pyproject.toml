@@ -122,12 +122,12 @@ exclude = ['^tests.*\.py$']
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cuda130", extra = "cuda" },
+    { index = "pytorch-cuda132", extra = "cuda" },
     { index = "pytorch-xpu", extra = "xpu" },
 ]
 torchvision = [
     { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cuda130", extra = "cuda" },
+    { index = "pytorch-cuda132", extra = "cuda" },
     { index = "pytorch-xpu", extra = "xpu" },
 ]
 pytorch-triton-xpu = { index = "pytorch-xpu" }
@@ -149,8 +149,8 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cuda130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cuda132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.uv]

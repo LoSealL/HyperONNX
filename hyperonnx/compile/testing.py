@@ -66,7 +66,8 @@ def replay(
     input_arrays: list[torch.Tensor],
     *,
     cutlass: bool = False,
-) -> torch.Tensor:
+    output_index: int | None = 0,
+) -> torch.Tensor | list[torch.Tensor]:
     """Replay a recorded pipeline from a kernel bundle.
 
     Walks the manifest's ``pipeline`` steps in execution order: triton
@@ -86,9 +87,13 @@ def replay(
             (mm / bmm / addmm) are executed via CuTe DSL GEMM kernels
             instead of ``torch.ops.aten``. Requires Linux + CuTe DSL.
             Unsupported ops and steps without config fall through to aten.
+        output_index: index into ``io.outputs`` to return. ``None``
+            returns every declared output as a list (multi-output
+            modules).
 
     Returns:
-        The output tensor.
+        The output tensor (or list of output tensors when
+        ``output_index is None``).
     """
 
     drv = importlib.import_module("cuda.bindings.driver")
@@ -241,7 +246,21 @@ def replay(
                     [int(s) for s in shape], [int(s) for s in stride], view_offset
                 )
             # No per-arg layout: fall back to the table's recorded layout.
-            meta_shape, meta_stride = meta.get("shape"), meta.get("stride")
+            # Alias/view entries may carry no layout of their own — chase
+            # alias_of/view_of links for one. Without this, a storage reused
+            # across differently-shaped allocates (inductor memory planner)
+            # resolves to the stale first-registered view.
+            probe = meta
+            meta_shape, meta_stride = None, None
+            for _ in range(8):
+                meta_shape = probe.get("shape")
+                meta_stride = probe.get("stride")
+                if meta_shape and meta_stride:
+                    break
+                nxt = probe.get("alias_of") or probe.get("view_of")
+                if not nxt:
+                    break
+                probe = table.get(nxt, {})
             if meta_shape and meta_stride and len(meta_shape) == len(meta_stride):
                 shape = [int(s) for s in meta_shape]
                 stride = [int(s) for s in meta_stride]
@@ -478,7 +497,7 @@ def replay(
 
     drv.cuStreamSynchronize(stream)
 
-    # Select the output buffer matching io.outputs[0]'s declared shape.
+    # Select the output buffer matching the declared io.outputs entry.
     # For multi-output modules the registry tags every tuple element as
     # kind="output" in buffer-creation order, which need not match the
     # return tuple's order — picking manifest-first returns the wrong tensor.
@@ -487,8 +506,17 @@ def replay(
     if not output_bufs:
         raise RuntimeError("no output buffer in manifest")
 
-    if io_outputs:
-        expected_shape = [int(s) for s in io_outputs[0]["shape"]]
+    def _pick(entry: dict | None) -> dict:
+        if entry is None:
+            return output_bufs[0]
+        # io.outputs carries the launch-trace buffer_id — authoritative even
+        # when the registry entry's shape was frozen stale by storage reuse.
+        by_id = next(
+            (b for b in buffers_meta if b["id"] == entry.get("buffer_id")), None
+        )
+        if by_id is not None:
+            return by_id
+        expected_shape = [int(s) for s in entry["shape"]]
         expected_numel = math.prod(expected_shape)
         chosen = next(
             (b for b in output_bufs if [int(s) for s in b["shape"]] == expected_shape),
@@ -498,36 +526,49 @@ def replay(
             chosen = next(
                 (
                     b
-                    for b in output_bufs
+                    for b in buffers_meta
                     if math.prod(int(s) for s in b["shape"]) == expected_numel
                 ),
                 output_bufs[0],
             )
-    else:
-        expected_shape = None
-        chosen = output_bufs[0]
+        return chosen
 
-    output_bid = chosen["id"]
+    def _materialize(entry: dict | None) -> torch.Tensor:
+        output_bid = _pick(entry)["id"]
+        # Prefer the final writer's layout over the registry's first-seen view.
+        out_t = tensors[output_bid]
+        layout = last_out_layout.get(output_bid)
+        if layout is not None and output_bid in storages:
+            shape, stride = layout
+            out_t = storages[output_bid].as_strided(
+                [int(s) for s in shape], [int(s) for s in stride]
+            )
+        elif output_bid in storages:
+            if entry is not None:
+                # Declared shape wins over a possibly stale registry view
+                # (storage reuse freezes first-sighting shapes).
+                expected_shape = [int(s) for s in entry["shape"]]
+                out_t = storages[output_bid][: math.prod(expected_shape)].view(
+                    expected_shape
+                )
+            else:
+                n = out_t.numel()
+                out_t = storages[output_bid][:n].view(out_t.shape)
 
-    # Prefer the final writer's layout over the registry's first-seen view.
-    out_t = tensors[output_bid]
-    layout = last_out_layout.get(output_bid)
-    if layout is not None and output_bid in storages:
-        shape, stride = layout
-        out_t = storages[output_bid].as_strided(
-            [int(s) for s in shape], [int(s) for s in stride]
-        )
-    elif output_bid in storages:
-        n = out_t.numel()
-        out_t = storages[output_bid][:n].view(out_t.shape)
+        # Apply the graph's output reshape (inductor's return expression wraps
+        # the output buffer with reinterpret_tensor to give it the model's
+        # declared output shape/stride). io.outputs carries the declared shape.
+        if entry is not None:
+            expected_shape = [int(s) for s in entry["shape"]]
+            if list(out_t.shape) != expected_shape:
+                if out_t.is_contiguous():
+                    out_t = out_t.view(expected_shape)
+        return out_t
 
-    # Apply the graph's output reshape (inductor's return expression wraps
-    # the output buffer with reinterpret_tensor to give it the model's
-    # declared output shape/stride). io.outputs carries the declared shape.
-    if expected_shape is not None and list(out_t.shape) != expected_shape:
-        if out_t.is_contiguous():
-            out_t = out_t.view(expected_shape)
-    return out_t
+    if output_index is None and io_outputs:
+        return [_materialize(entry) for entry in io_outputs]
+    entry = io_outputs[output_index] if io_outputs else None
+    return _materialize(entry)
 
 
 def verify(
@@ -540,7 +581,8 @@ def verify(
     cutlass: bool = False,
 ) -> bool:
     """Replay from bundle and compare against expected output."""
-    out = replay(bundle_dir, input_arrays, cutlass=cutlass)
+    out = replay(bundle_dir, input_arrays, cutlass=cutlass, output_index=0)
+    assert isinstance(out, torch.Tensor)
     ok = torch.allclose(out, expected_output, atol=atol, rtol=rtol)
     if not ok:
         diff = (out.float() - expected_output.float()).abs()

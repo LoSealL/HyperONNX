@@ -202,22 +202,32 @@ def replay(
     def _resolve_base(
         name: str | None, table: dict, bid: int | None
     ) -> tuple[int | None, int]:
-        """Follow ``view_of`` links to the base allocation, accumulating offset.
+        """Follow ``view_of``/``alias_of`` links to the base allocation,
+        accumulating offset.
 
         Reinterpret views get a distinct runtime id (pointer dedup hands
         non-zero-offset views their own id); the launch-trace buffer_id is
-        the view's id, not the storage the data lives in. Reads
-        (``tensor_for``) and writes (``run_extern``) must agree on storage,
-        so both route through here.
+        the view's id, not the storage the data lives in. ``alias_of`` reuse
+        entries can carry a stale own id (the exporter stamps the reused
+        name with the allocator slot current at the *next* launch, which can
+        lag one reuse behind), so they must resolve through their source
+        too — otherwise two live names of different storages collide on one
+        storage and race. Reads (``tensor_for``) and writes (``run_extern``)
+        must agree on storage, so both route through here.
         """
-        cur_meta = table.get(name or "", {})
+        cur_name = name or ""
+        cur_meta = table.get(cur_name, {})
         cur_bid = bid
         view_offset = 0
-        _seen: set[int] = set()
-        while cur_meta.get("view_of") and cur_bid is not None and cur_bid not in _seen:
-            _seen.add(cur_bid)
+        _seen: set[str] = set()
+        while cur_bid is not None and cur_name not in _seen:
+            nxt = cur_meta.get("view_of") or cur_meta.get("alias_of")
+            if not nxt:
+                break
+            _seen.add(cur_name)
             view_offset += int(cur_meta.get("offset", 0))
-            cur_meta = table.get(cur_meta["view_of"], {})
+            cur_name = nxt
+            cur_meta = table.get(cur_name, {})
             cur_bid = cur_meta.get("buffer_id")
         base_bid = cur_bid if cur_bid is not None else bid
         return base_bid, view_offset
@@ -306,7 +316,9 @@ def replay(
             functions[sym] = func
         return functions[sym]
 
-    _, stream = drv.cuStreamCreate(0)
+    # Launch on torch's current stream: extern_kernel steps run aten ops on
+    # it, so a separate stream would race them against the triton launches.
+    stream = drv.CUstream(torch.cuda.current_stream().cuda_stream)
     keep_alive: list[Any] = []
 
     def launch_triton(step: dict, table: dict) -> None:

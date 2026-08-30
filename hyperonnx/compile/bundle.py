@@ -19,6 +19,9 @@ import ast as pyast
 import importlib
 import json
 import re
+from collections import Counter
+from collections.abc import Mapping
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -120,8 +123,9 @@ def _contiguous_span(shape: list) -> int:
     return max(1, n)
 
 
-def _registry_span(entry: BufferEntry) -> int:
-    """Storage span a registry ``BufferEntry`` demands at replay."""
+def _registry_span(entry: Mapping[str, Any]) -> int:
+    """Storage span (in elements) a layout dict demands — registry entry or
+    graph-table meta (same shape/stride keys)."""
     shape = entry.get("shape")
     if not shape:
         return 0
@@ -131,6 +135,21 @@ def _registry_span(entry: BufferEntry) -> int:
         if span is not None:
             return span
     return _contiguous_span(shape)
+
+
+_DTYPE_SIZE = {
+    "bool": 1,
+    "int8": 1,
+    "uint8": 1,
+    "float16": 2,
+    "bfloat16": 2,
+    "float32": 4,
+    "int32": 4,
+    "float64": 8,
+    "int64": 8,
+}
+"""Element width per dtype string; unknown dtypes fall back to 4 bytes
+(replay's own ``getattr(torch, dtype, torch.float32)`` fallback)."""
 
 
 def _static_arg_descriptor(arg: Any, table: dict[str, dict], owner: str) -> dict:
@@ -371,6 +390,7 @@ def _finalize_pipeline(
     pipeline: list[dict],
     kernel_entries: list[KernelEntry],
     runtime_buffers: "list[BufferInfo]",
+    symbol_to_traces: "dict[str, list[LaunchTraceEntry]] | None" = None,
 ) -> list[dict]:
     """Merge the wrapper pipeline with kernel entries and validate buffers.
 
@@ -388,10 +408,15 @@ def _finalize_pipeline(
         (shape, dtype), attaching ``buffer_id`` on match; undefined names
         are flagged and warned about.
 
-    Launch descriptors come directly from ``kernel_entries`` — each entry's
-    ``args`` were already overlaid with the traced runtime descriptors
-    (carrying ``buffer_id``\\s) in :func:`write_kernel_bundle`. A symbol
-    appearing multiple times is seeded only on first occurrence.
+    When ``symbol_to_traces`` is given (per-symbol queues of call-site
+    traces, in launch order), every ``triton_kernel`` step consumes its
+    own call-site trace: the trace's ``args`` (carrying ``buffer_id``\\s)
+    seed the table and become the step's launch descriptors, and its
+    grid/warps/shared-mem overlay the step's ``launch`` — so repeated
+    call sites of one symbol each keep their own buffers and launch
+    config. Steps past the end of their queue fall back to table
+    resolution (``launch_missing``). Without traces, each entry's
+    overlaid ``args`` seed only the first occurrence of their symbol.
 
     Mismatches are logged and annotated, never fatal.
     """
@@ -478,25 +503,39 @@ def _finalize_pipeline(
 
         # Resolve graph inputs by FX placeholder target (exact name match).
         _map_graph_inputs_by_source(table, runtime_buffers, rt_claimed)
-        # Seed name→buffer_id from kernel entries. Only the FIRST occurrence
-        # of each symbol is seeded — repeated call sites have different
-        # buffer ids and must resolve via the table.
+        # Seed name→buffer_id per call site. With launch traces, every
+        # occurrence of a symbol consumes its own trace (in launch order),
+        # so repeated call sites each seed their own buffer ids and launch
+        # config. Without traces, only the first occurrence of each symbol
+        # is seeded from the entry args; later call sites resolve via the
+        # table.
         seeded_symbols: set[str] = set()
         for step in kept:
             if step["type"] != "triton_kernel" or "cubin" not in step:
                 continue
-            entry = symbol_to_entry.get(step["kernel"])
-            entry_args = entry["args"] if entry else None
             kernel_sym = step["kernel"]
-            if kernel_sym in seeded_symbols:
-                step["_launch_args"] = None
-                continue
-            seeded_symbols.add(kernel_sym)
-            step["_launch_args"] = entry_args or None
-            if not entry_args:
+            entry = symbol_to_entry.get(kernel_sym)
+            trace: LaunchTraceEntry | None = None
+            if symbol_to_traces is not None:
+                queue = symbol_to_traces.get(kernel_sym)
+                trace = queue.pop(0) if queue else None
+                launch_args = trace.args if trace is not None else None
+            elif kernel_sym in seeded_symbols:
+                launch_args = None
+            else:
+                seeded_symbols.add(kernel_sym)
+                launch_args = (entry["args"] if entry else None) or None
+            step["_launch_args"] = launch_args or None
+            if trace is not None and entry is not None:
+                # Per-call-site launch config — a later call site of the
+                # same symbol may launch with a different grid.
+                launch = dict(entry["launch"])
+                _overlay_launch(launch, trace)
+                step["launch"] = launch
+            if not launch_args:
                 continue
             static = step["_static_args"]
-            for i, ka in enumerate(entry_args):
+            for i, ka in enumerate(launch_args):
                 if ka.get("kind") != "tensor":
                     continue
                 ka_bid = ka.get("buffer_id")
@@ -610,51 +649,120 @@ def _reconcile_registry_with_allocate(
     a too-small shape. The full-size ``[2,…]`` shape exists only in the
     graph-table ``allocate`` entry (from inductor IR ``buf.get_size()``).
 
-    For every graph-table entry with ``kind=="allocate"`` and a resolved
-    ``buffer_id``, compute the allocate's storage span; if the registry
-    entry for that id has a smaller span, overwrite it with the allocate's
-    shape/stride (and contiguous fallback) so replay allocates enough
-    storage for the views the kernels take.
+    For every graph-table ``allocate``/``view`` entry with a resolved
+    ``buffer_id``, compute the layout's storage span *in bytes* (one
+    storage can host allocations of different dtypes across its lifetime —
+    e.g. an f32 scratch followed by an fp16 output on the same id — so an
+    element-span compare can under-size the storage); if the registry entry
+    covers fewer bytes, overwrite its shape with a contiguous layout big
+    enough for the widest use, so replay allocates enough storage for every
+    view the kernels take. The registry dtype follows the LAST allocate on
+    the id (the final writer — the output materialization reads through
+    it).
 
     This is the only position with full information: launch-trace-side
     capture cannot observe allocations that never appear as kernel args.
     Mutates ``registry`` in place.
     """
     by_id: dict[int, BufferEntry] = {b["id"]: b for b in registry}
+    need_bytes: dict[int, int] = {}
     for graph in pipeline:
         table = graph.get("buffers", {})
         for meta in table.values():
-            if meta.get("kind") != "allocate":
+            if meta.get("kind") not in ("allocate", "view"):
                 continue
             bid = meta.get("buffer_id")
-            if bid is None:
-                continue
             entry = by_id.get(bid)
             if entry is None:
                 continue
-            alloc_shape = meta.get("shape")
-            if not alloc_shape:
+            span = _registry_span(meta)
+            if not span:
+                continue
+            size = _DTYPE_SIZE.get(meta.get("dtype") or entry.get("dtype", ""), 4)
+            need_bytes[bid] = max(need_bytes.get(bid, 0), span * size)
+            if meta.get("kind") != "allocate":
                 continue
             alloc_dtype = meta.get("dtype")
             if alloc_dtype and entry.get("dtype") != alloc_dtype:
                 entry["dtype"] = alloc_dtype
-            alloc_stride = meta.get("stride")
-            alloc_span: int
-            if alloc_stride and len(alloc_stride) == len(alloc_shape):
-                s = _layout_span(alloc_shape, alloc_stride)
-                alloc_span = s if s is not None else _contiguous_span(alloc_shape)
-            else:
-                alloc_span = _contiguous_span(alloc_shape)
-            if alloc_span <= _registry_span(entry):
+            # Both sides scale by the same (synced) dtype width → bytes
+            # cancel; cross-dtype under-sizing is caught by need_bytes below.
+            if span <= _registry_span(entry):
                 continue
-            # Overwrite: registry must hold at least the allocate span.
-            entry["shape"] = [int(x) for x in alloc_shape]
-            if alloc_stride and len(alloc_stride) == len(alloc_shape):
+            # Overwrite: registry must hold at least the allocate's bytes.
+            entry["shape"] = [int(x) for x in meta["shape"]]
+            alloc_stride = meta.get("stride")
+            if alloc_stride and len(alloc_stride) == len(meta["shape"]):
                 entry["stride"] = [int(x) for x in alloc_stride]
             elif "stride" in entry:
                 # Old stride was for a smaller shape; drop it so replay
                 # falls back to a contiguous view of the new shape.
                 del entry["stride"]
+    # Views / wider-dtype uses no single allocate layout covered (e.g. an
+    # f32 scratch on storage whose frozen shape is fp16): grow flat.
+    for bid, entry in by_id.items():
+        size = _DTYPE_SIZE.get(entry.get("dtype", ""), 4)
+        if need_bytes.get(bid, 0) <= _registry_span(entry) * size:
+            continue
+        entry["shape"] = [-(-need_bytes[bid] // size)]
+        entry.pop("stride", None)
+
+
+def _launch_fingerprint(entry: "LaunchTraceEntry") -> tuple:
+    """Arg identity of a launch: tensor args contribute their ``buffer_id``,
+    scalar args their ``value``. Benchmark reps of a call site share its
+    fingerprint; a launch on different buffers starts a new segment."""
+    return tuple(
+        ("tensor", a.get("buffer_id"))
+        if a.get("kind") == "tensor"
+        else ("scalar", a.get("value"))
+        for a in entry.args
+    )
+
+
+def _overlay_launch(launch: dict, trace: "LaunchTraceEntry") -> None:
+    """Overlay a trace's per-call-site launch config onto a launch dict."""
+    launch["captured_grid"] = list(trace.grid)
+    launch["shared_mem_bytes"] = trace.shared_mem
+    launch["num_warps"] = trace.num_warps
+    launch["num_scratch_args"] = trace.num_scratch_args
+
+
+def _call_site_traces(
+    all_launches: "list[LaunchTraceEntry]", step_counts: dict[str, int]
+) -> "list[LaunchTraceEntry]":
+    """Extract the per-call-site production launches from the raw stream.
+
+    The autotuner fires a benchmark storm before the first call site's
+    production launch; later call sites of the same kernel reuse the
+    cached winner and launch once each — possibly right after the
+    previous site (no other symbol in between), so one call site is not
+    one consecutive symbol run. Instead, split each consecutive
+    same-symbol run into fingerprint segments: the last launch of every
+    segment is a production candidate (benchmark reps share their site's
+    fingerprint and precede its production launch inside the segment),
+    and the pipeline's per-symbol step count selects the trailing
+    candidates — dropping pure-benchmark segments (scratch-buffer
+    benchmarks of a site whose production launch carries different
+    args). Symbols with no pipeline steps contribute no traces.
+    """
+    entries: list[LaunchTraceEntry] = []
+    for symbol, grp in groupby(all_launches, key=lambda e: e.symbol):
+        run = list(grp)
+        cands: list[LaunchTraceEntry] = []
+        prev_fp: tuple | None = None
+        prev: LaunchTraceEntry | None = None
+        for e in run:
+            fp = _launch_fingerprint(e)
+            if prev is not None and fp != prev_fp:
+                cands.append(prev)
+            prev_fp, prev = fp, e
+        if prev is not None:
+            cands.append(prev)
+        n = step_counts.get(symbol, 0)
+        if n:
+            entries.extend(cands[-n:])
+    return entries
 
 
 def write_kernel_bundle(
@@ -703,15 +811,27 @@ def write_kernel_bundle(
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     symbol_to_trace: dict[str, LaunchTraceEntry] = {}
+    symbol_to_traces: dict[str, list[LaunchTraceEntry]] = {}
     winning_keys: set[str] | None = None
     winning_hashes: set[str] = set()
     if launch_trace is not None:
-        for e in launch_trace.entries:
-            symbol_to_trace[e.symbol] = e
-        winning_keys = {
-            f"{e.symbol}|{e.shared_mem}|{e.num_warps}" for e in launch_trace.entries
-        }
-        winning_hashes = {e.kernel_hash for e in launch_trace.entries if e.kernel_hash}
+        if wrapper_graph:
+            # Per-call-site traces, in launch order: one per pipeline
+            # triton step of the symbol (see _call_site_traces).
+            step_counts = Counter(
+                step["kernel"]
+                for graph in wrapper_graph
+                for step in graph["steps"]
+                if step.get("type") == "triton_kernel" and step.get("kernel")
+            )
+            traces = _call_site_traces(launch_trace.all_launches, step_counts)
+        else:
+            traces = launch_trace.entries
+        for e in traces:
+            symbol_to_trace.setdefault(e.symbol, e)
+            symbol_to_traces.setdefault(e.symbol, []).append(e)
+        winning_keys = {f"{e.symbol}|{e.shared_mem}|{e.num_warps}" for e in traces}
+        winning_hashes = {e.kernel_hash for e in traces if e.kernel_hash}
 
     entries: list[KernelEntry] = []
     for k in kernels:
@@ -746,10 +866,7 @@ def write_kernel_bundle(
 
         trace: LaunchTraceEntry | None = symbol_to_trace.get(k["symbol"])
         if trace is not None:
-            launch["captured_grid"] = list(trace.grid)
-            launch["shared_mem_bytes"] = trace.shared_mem
-            launch["num_warps"] = trace.num_warps
-            launch["num_scratch_args"] = trace.num_scratch_args
+            _overlay_launch(launch, trace)
             args = trace.args
 
         entries.append(
@@ -795,6 +912,7 @@ def write_kernel_bundle(
             wrapper_graph,
             entries,
             launch_trace.buffers if launch_trace is not None else [],
+            symbol_to_traces if launch_trace is not None else None,
         )
     else:
         manifest["pipeline"] = [

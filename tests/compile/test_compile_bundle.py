@@ -1,12 +1,14 @@
 """Unit tests for the bundle writer."""
 
 import json
+import math
 from inspect import signature
 from pathlib import Path
 
 import torch
 
 from hyperonnx.compile.bundle import (
+    _call_site_traces,
     _finalize_pipeline,
     _layout_span,
     _reconcile_registry_with_allocate,
@@ -425,6 +427,112 @@ def test_finalize_pipeline_repeated_kernel_resolves_second_from_table():
     assert steps[1]["args"][0]["name"] == "buf1"
 
 
+def _launch_entry(
+    symbol: str, bufs: tuple[int, ...], grid: tuple[int, int, int] = (1, 1, 1)
+) -> LaunchTraceEntry:
+    return LaunchTraceEntry(
+        symbol=symbol,
+        grid=grid,
+        shared_mem=0,
+        num_warps=4,
+        args=[{"kind": "tensor", "buffer_id": b} for b in bufs],
+    )
+
+
+def test_finalize_collapses_autotune_runs_per_call_site():
+    """Autotune benchmarks fire back-to-back before the production launch
+    of each call site (possibly on different scratch buffers); each
+    consecutive run of a symbol collapses to its last launch, and every
+    call site of a symbol keeps its own entry in launch order."""
+    sink = LaunchTraceSink()
+    sink.all_launches = [
+        _launch_entry("k0", (0, 1), grid=(1, 1, 1)),  # site A autotune
+        _launch_entry("k0", (0, 1), grid=(2, 1, 1)),  # site A autotune
+        _launch_entry("k0", (3, 4), grid=(2, 1, 1)),  # site A production
+        _launch_entry("k1", (5,)),
+        _launch_entry("k0", (6, 7)),  # site B autotune
+        _launch_entry("k0", (6, 7)),  # site B production
+    ]
+    sink.finalize()
+    assert [e.symbol for e in sink.entries] == ["k0", "k1", "k0"]
+    assert sink.entries[0].grid == (2, 1, 1)  # last of the run wins
+    assert [a.get("buffer_id") for a in sink.entries[0].args] == [3, 4]
+    assert [a.get("buffer_id") for a in sink.entries[2].args] == [6, 7]
+
+
+def test_finalize_pipeline_seeds_each_call_site_from_own_trace():
+    """With per-call-site trace queues, each pipeline occurrence of a
+    symbol is seeded from its own trace — no cross-wired buffer ids, no
+    launch_missing — and gets its own launch overlay (the second call
+    site may launch with a different grid)."""
+    graph = {
+        "graph": "",
+        "buffers": {},
+        "steps": [
+            {
+                "type": "allocate",
+                "buffer": "buf0",
+                "shape": ["4"],
+                "stride": ["1"],
+                "dtype": "float32",
+            },
+            {
+                "type": "allocate",
+                "buffer": "buf1",
+                "shape": ["4"],
+                "stride": ["1"],
+                "dtype": "float32",
+            },
+            {"type": "triton_kernel", "kernel": "k0", "args": ["buf0", 4]},
+            {"type": "triton_kernel", "kernel": "k0", "args": ["buf1", 4]},
+        ],
+    }
+    traces = {
+        "k0": [
+            LaunchTraceEntry(
+                symbol="k0",
+                grid=(1, 1, 1),
+                shared_mem=0,
+                num_warps=4,
+                args=[
+                    {"kind": "tensor", "buffer_id": 7, "direction": "out"},
+                    {"kind": "scalar", "dtype": "int32", "value": 4},
+                ],
+            ),
+            LaunchTraceEntry(
+                symbol="k0",
+                grid=(2, 1, 1),
+                shared_mem=0,
+                num_warps=4,
+                args=[
+                    {"kind": "tensor", "buffer_id": 9, "direction": "out"},
+                    {"kind": "scalar", "dtype": "int32", "value": 4},
+                ],
+            ),
+        ]
+    }
+    out = _finalize_pipeline([graph], _kernel_entries(), [], traces)
+    steps = [s for s in out[0]["steps"] if s["type"] == "triton_kernel"]
+    assert all("launch_missing" not in s for s in steps)
+    assert steps[0]["args"][0] == {
+        "kind": "tensor",
+        "buffer_id": 7,
+        "direction": "out",
+        "name": "buf0",
+    }
+    assert steps[1]["args"][0] == {
+        "kind": "tensor",
+        "buffer_id": 9,
+        "direction": "out",
+        "name": "buf1",
+    }
+    table = out[0]["buffers"]
+    assert table["buf0"]["buffer_id"] == 7
+    assert table["buf1"]["buffer_id"] == 9
+    assert steps[0]["launch"]["captured_grid"] == [1, 1, 1]
+    assert steps[1]["launch"]["captured_grid"] == [2, 1, 1]
+
+
 def test_autotune_loser_variants_are_dropped(tmp_path: Path):
     """Two compiled variants share symbol+warps+shared (differ only in
     XBLOCK, invisible to the legacy key filter); only the launched winner's
@@ -627,6 +735,7 @@ def test_reconcile_through_full_write_kernel_bundle(tmp_path: Path):
             args=k["args"],
         )
     ]
+    trace.all_launches = list(trace.entries)
     # Launch trace freezes buffer 0 at the half-size view shape [1,240,258].
     trace.get_or_create_buffer(0x26000, "float32", (1, 240, 258), (61920, 258, 1))
     # Graph-table allocate says the true size is [2,240,258]; the kernel's
@@ -715,6 +824,110 @@ def test_reconcile_dtype_mismatch():
     assert registry[0]["dtype"] == "float32", (
         "registry dtype should be reconciled to the allocate's float32"
     )
+
+
+def test_call_site_traces_splits_adjacent_sites_and_drops_benchmarks():
+    """Benchmark storms precede the first production launch; later call
+    sites of the same kernel launch once each, possibly adjacent (no
+    other symbol between). Production candidates = last launch of every
+    fingerprint segment; the pipeline step count selects the trailing
+    ones — dropping pure-benchmark segments (scratch-buffer benchmarks
+    of a site whose production launch carries different args)."""
+    launches = [
+        # k0: two benchmark reps on scratch buffers, then two adjacent
+        # call sites' production launches.
+        _launch_entry("k0", (0, 1)),
+        _launch_entry("k0", (0, 1)),
+        _launch_entry("k0", (3, 4)),
+        _launch_entry("k0", (6, 7)),
+        _launch_entry("k1", (8,)),
+        # k2: benchmarks on scratch buffers, production on real buffers
+        # (one call site).
+        _launch_entry("k2", (9,)),
+        _launch_entry("k2", (9,)),
+        _launch_entry("k2", (10,)),
+    ]
+    out = _call_site_traces(launches, {"k0": 2, "k1": 1, "k2": 1})
+    assert [(e.symbol, e.args[0].get("buffer_id")) for e in out] == [
+        ("k0", 3),
+        ("k0", 6),
+        ("k1", 8),
+        ("k2", 10),
+    ]
+    # No pipeline steps for a symbol → no traces (benchmarks dropped).
+    assert _call_site_traces(launches, {}) == []
+
+
+def test_call_site_traces_keeps_last_of_identical_fingerprint_run():
+    """Benchmarks sharing their site's fingerprint collapse into the
+    segment's last launch; two call sites separated by other symbols are
+    separate runs, each contributing one production launch."""
+    launches = [
+        _launch_entry("k0", (3, 4), grid=(1, 1, 1)),  # site A bench
+        _launch_entry("k0", (3, 4), grid=(2, 1, 1)),  # site A production
+        _launch_entry("k1", (5,)),
+        _launch_entry("k0", (6, 7)),  # site B bench (cached-winner: 1)
+        _launch_entry("k0", (6, 7)),  # site B production
+    ]
+    out = _call_site_traces(launches, {"k0": 2, "k1": 1})
+    assert [(e.symbol, e.args[0].get("buffer_id")) for e in out] == [
+        ("k0", 3),
+        ("k1", 5),
+        ("k0", 6),
+    ]
+    assert out[0].grid == (2, 1, 1)  # last of the segment wins
+
+
+def test_reconcile_grows_storage_for_wider_dtype_use():
+    """One storage hosts allocations of different dtypes over its lifetime
+    (GlobalCorrelation buf9/buf27: an f32 [2,12,21] scratch followed by an
+    fp16 [2,12,20,2] output on the same buffer_id). Element-span compare
+    says the f32 use (504 elems) fits the frozen fp16 shape (960 elems),
+    but in bytes 504*4=2016 > 960*2=1920, so replay's fp16 storage is 96
+    bytes short and the f32 kernel writes past its end. Reconcile must
+    compare bytes and grow the storage; the last allocate's dtype (the
+    final writer) stays the registry dtype."""
+    registry = [
+        {
+            "id": 8,
+            "kind": "output",
+            "dtype": "float16",
+            "shape": [2, 12, 20, 2],
+            "stride": [480, 40, 2, 1],
+        },
+    ]
+    pipeline = [
+        {
+            "graph": "g0",
+            "buffers": {
+                "buf9": {
+                    "kind": "allocate",
+                    "shape": [2, 12, 21],
+                    "stride": [252, 21, 1],
+                    "dtype": "float32",
+                    "buffer_id": 8,
+                },
+                "buf27": {
+                    "kind": "allocate",
+                    "shape": [2, 12, 20, 2],
+                    "stride": [480, 40, 2, 1],
+                    "dtype": "float16",
+                    "buffer_id": 8,
+                },
+            },
+            "steps": [],
+        }
+    ]
+    _reconcile_registry_with_allocate(registry, pipeline)
+    assert registry[0]["dtype"] == "float16"  # last writer wins
+    # Storage covers 2016 bytes = 1008 fp16 elements.
+    shape, stride = registry[0]["shape"], registry[0].get("stride")
+    span = (
+        sum((int(s) - 1) * int(st) for s, st in zip(shape, stride)) + 1
+        if stride and len(stride) == len(shape)
+        else math.prod(int(s) for s in shape)
+    )
+    assert span * 2 >= 2016
 
 
 def test_buffer_id_of_links_tensor_by_data_ptr():

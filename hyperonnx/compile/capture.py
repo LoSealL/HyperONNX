@@ -752,19 +752,25 @@ class LaunchTraceSink:
             self._ptr_to_buf[ptr].kind = "output"
 
     def finalize(self) -> None:
-        """Deduplicate launches, keeping the last-seen config per symbol.
+        """Collapse autotune runs, keeping one entry per call site.
 
-        Triton's autotuner may fire the same kernel several times; replay
-        wants one entry per symbol (the winning config), so we walk
-        ``all_launches`` in reverse and keep the first occurrence of each.
+        Triton's autotuner benchmarks its configs back-to-back before a
+        call site's production launch, then launches the winner once and
+        the wrapper moves on to the next kernel — so one call site is
+        one consecutive run of its symbol, and the production launch is
+        the run's last entry. Benchmark runs may carry different
+        (scratch) buffers than production, so neither config nor args
+        identify the winner; position does. A symbol launched at
+        multiple call sites keeps one entry per call site, in launch
+        order, so the bundle can seed each pipeline occurrence from its
+        own trace.
         """
-        seen: set[str] = set()
         winners: list[LaunchTraceEntry] = []
-        for entry in reversed(self.all_launches):
-            if entry.symbol not in seen:
-                seen.add(entry.symbol)
+        for entry in self.all_launches:
+            if winners and winners[-1].symbol == entry.symbol:
+                winners[-1] = entry
+            else:
                 winners.append(entry)
-        winners.reverse()
         self.entries = winners
 
     def vendor_lib_gaps(self) -> list[BufferInfo]:
@@ -813,8 +819,8 @@ def capture_launch_trace(
         input_kwargs: keyword input tensors (optional).
 
     Yields:
-        LaunchTraceSink with ``.entries`` (deduped launch records) and
-        ``.buffers`` (all device buffers seen).
+        LaunchTraceSink with ``.entries`` (one launch record per call
+        site) and ``.buffers`` (all device buffers seen).
 
     Limitation: only triton launches via ``StaticallyLaunchedCudaKernel.run``
     are observed. Ops inductor delegates to a vendor library (cuDNN convs,

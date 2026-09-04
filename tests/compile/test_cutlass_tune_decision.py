@@ -169,3 +169,57 @@ def test_annotate_keeps_config_when_cublas_wins(tmp_path, monkeypatch):
     cutlass_mod.annotate_cutlass_config(bundle_dir)
     again = json.loads((bundle_dir / "manifest.json").read_text())
     assert again == updated
+
+
+def _conv_args():
+    # input (N, C, H, W), weight (K_out, C_in/groups, R, S)
+    return [
+        {"kind": "tensor", "shape": [2, 128, 48, 80], "dtype": "float16"},
+        {"kind": "tensor", "shape": [128, 1, 3, 3], "dtype": "float16"},
+    ]
+
+
+@_requires_cutlass
+def test_conv_to_gemm_args_matches_replay_shape():
+    """Tuning must see the same per-group im2col GEMM that replay runs."""
+    from hyperonnx.compile.cutlass_kernels import conv
+
+    kwargs = [
+        "stride=(1, 1)",
+        "padding=(1, 1)",
+        "dilation=(1, 1)",
+        "transposed=False",
+        "output_padding=(0, 0)",
+        "groups=128",
+        "bias=None",
+    ]
+    gemm_args = conv._conv_to_gemm_args(_conv_args(), {}, kwargs)
+    # depthwise 3x3: M=K_out/groups=1, K=1*3*3, N=H_out*W_out=48*80
+    assert gemm_args[0]["shape"] == [1, 9]
+    assert gemm_args[1]["shape"] == [9, 3840]
+
+    # groups==1 honors stride: H_out=(48-2-1)//2+1=23, W_out=(80-2-1)//2+1=39
+    plain = [
+        {"kind": "tensor", "shape": [2, 16, 48, 80], "dtype": "float16"},
+        {"kind": "tensor", "shape": [32, 16, 3, 3], "dtype": "float16"},
+    ]
+    gemm_args = conv._conv_to_gemm_args(plain, {}, ["stride=(2, 2)", "groups=1"])
+    assert gemm_args[0]["shape"] == [32, 16 * 3 * 3]
+    assert gemm_args[1]["shape"] == [16 * 3 * 3, 23 * 39]
+
+
+@_requires_cutlass
+def test_tune_conv_depthwise_picks_cublas(monkeypatch):
+    """Per-group depthwise shapes are tiled-ineligible: cuBLAS stays winner."""
+    from hyperonnx.compile.cutlass_kernels import conv, mm
+
+    monkeypatch.setattr(mm, "_bench_tiled_mm", lambda *a, **k: 0.1)
+    monkeypatch.setattr(mm, "_bench_cublas_mm", lambda *a: 1.0)
+
+    kwargs = ["stride=(1, 1)", "padding=(1, 1)", "groups=128"]
+    config, bench = conv.tune_conv(_conv_args(), {}, "sm_120", kwargs=kwargs)
+
+    assert config is not None
+    assert config.naive is True
+    assert bench["winner"] == "cublas"
+    assert bench["cutlass_ms"] is None

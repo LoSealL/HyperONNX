@@ -753,6 +753,7 @@ def tune_mm(
     buffers: dict,
     arch: str,
     configs: list[CutlassConfig] | None = None,
+    kwargs: list[str] | None = None,  # noqa: ARG001 — uniform tuner signature
 ) -> tuple[CutlassConfig, dict]:
     """Autotune GEMM configs against a cuBLAS baseline.
 
@@ -761,6 +762,8 @@ def tune_mm(
         buffers: buffer table from the manifest.
         arch: GPU arch string (e.g. "sm_120").
         configs: list of CutlassConfig to benchmark. Defaults to MM_CONFIGS.
+        kwargs: step kwargs strings; unused for plain GEMMs (shape comes
+            from the args). Accepted so all tuners share one signature.
 
     Returns:
         ``(config, bench)``. ``config`` is always the best CUTLASS config

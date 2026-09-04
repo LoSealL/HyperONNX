@@ -151,6 +151,14 @@ class StaticCache(Tensor):
             return 0
         return int(self[layer_idx, 0].any(dim=-1).sum().item())
 
+    def get_query_offset(self, layer_idx: int = 0) -> int:
+        """Returns the current query offset for the given layer.
+
+        Required by ``transformers>=5.14`` mask creation; equals the number
+        of already-cached tokens, same as transformers' own caches.
+        """
+        return self.get_seq_length(layer_idx)
+
     def get_mask_sizes(self, query_length: int, layer_idx: int) -> tuple[int, int]:
         """
         Return a tuple (kv_length, kv_offset) corresponding to the length and offset

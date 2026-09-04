@@ -110,7 +110,7 @@ def annotate_cutlass_config(
 
             try:
                 args = step.get("args", [])
-                config, bench = tuner(args, buffers, arch)
+                config, bench = tuner(args, buffers, arch, kwargs=step.get("kwargs"))
                 # ``cutlass_config`` always carries the best CUTLASS config
                 # (a naive fallback when none is eligible). ``cutlass_bench``
                 # records cuBLAS vs CUTLASS timings and ``winner``; the runner

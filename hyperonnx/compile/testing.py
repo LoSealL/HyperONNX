@@ -232,6 +232,25 @@ def replay(
         base_bid = cur_bid if cur_bid is not None else bid
         return base_bid, view_offset
 
+    def _storage_view(base_bid: int, view_offset: int, dt_name: str | None):
+        """(storage, element offset) viewed at ``dt_name``.
+
+        One buffer_id is one physical storage; inductor's memory planner
+        reuses a freed block for a different-dtype tensor (e.g. an fp32
+        intermediate followed by an fp16 folded conv weight on the same id).
+        The registry records a single dtype, so views must reinterpret the
+        storage bytes at the dtype the step/stage table declares, rescaling
+        the element offset by the element-size ratio.
+        """
+        storage = storages[base_bid]
+        want = getattr(torch, dt_name, None) if dt_name else None
+        if want is None or want == storage.dtype:
+            return storage, view_offset
+        byte_off = view_offset * storage.element_size()
+        if byte_off % want.itemsize != 0:
+            return storage, view_offset
+        return storage.view(want), byte_off // want.itemsize
+
     def tensor_for(arg: dict, table: dict) -> Any:
         """Resolve a step arg to a device tensor.
 
@@ -252,8 +271,11 @@ def replay(
         shape, stride = arg.get("shape"), arg.get("stride")
         if base_bid is not None and base_bid in storages:
             if shape and stride:
-                return storages[base_bid].as_strided(
-                    [int(s) for s in shape], [int(s) for s in stride], view_offset
+                st, off = _storage_view(
+                    base_bid, view_offset, arg.get("dtype") or meta.get("dtype")
+                )
+                return st.as_strided(
+                    [int(s) for s in shape], [int(s) for s in stride], off
                 )
             # No per-arg layout: fall back to the table's recorded layout.
             # Alias/view entries may carry no layout of their own — chase
@@ -261,10 +283,12 @@ def replay(
             # across differently-shaped allocates (inductor memory planner)
             # resolves to the stale first-registered view.
             probe = meta
-            meta_shape, meta_stride = None, None
+            meta_shape, meta_stride, meta_dt = None, None, arg.get("dtype")
             for _ in range(8):
                 meta_shape = probe.get("shape")
                 meta_stride = probe.get("stride")
+                if meta_dt is None:
+                    meta_dt = probe.get("dtype")
                 if meta_shape and meta_stride:
                     break
                 nxt = probe.get("alias_of") or probe.get("view_of")
@@ -272,11 +296,12 @@ def replay(
                     break
                 probe = table.get(nxt, {})
             if meta_shape and meta_stride and len(meta_shape) == len(meta_stride):
+                st, off = _storage_view(base_bid, view_offset, meta_dt)
                 shape = [int(s) for s in meta_shape]
                 stride = [int(s) for s in meta_stride]
-                span = sum((s - 1) * st for s, st in zip(shape, stride)) + 1
-                if storages[base_bid].numel() >= span + view_offset:
-                    return storages[base_bid].as_strided(shape, stride, view_offset)
+                span = sum((s - 1) * st_i for s, st_i in zip(shape, stride)) + 1
+                if st.numel() >= span + off:
+                    return st.as_strided(shape, stride, off)
             return tensors[base_bid]
         if name is not None and name in name_tensors:
             return name_tensors[name]
@@ -448,7 +473,11 @@ def replay(
                 if len(bs) == len(result.shape):
                     layout = (list(result.shape), bs)
         if base_bid is not None and base_bid in storages:
-            storage = storages[base_bid]
+            storage, view_offset = _storage_view(
+                base_bid,
+                view_offset,
+                step["output"].get("dtype") or meta.get("dtype"),
+            )
             if layout is not None:
                 shape, stride = layout
                 span = sum((s - 1) * st for s, st in zip(shape, stride)) + 1
@@ -549,20 +578,21 @@ def replay(
         output_bid = _pick(entry)["id"]
         # Prefer the final writer's layout over the registry's first-seen view.
         out_t = tensors[output_bid]
+        entry_dt = entry.get("dtype") if entry is not None else None
         layout = last_out_layout.get(output_bid)
         if layout is not None and output_bid in storages:
             shape, stride = layout
-            out_t = storages[output_bid].as_strided(
-                [int(s) for s in shape], [int(s) for s in stride]
+            st, off = _storage_view(output_bid, 0, entry_dt)
+            out_t = st.as_strided(
+                [int(s) for s in shape], [int(s) for s in stride], off
             )
         elif output_bid in storages:
             if entry is not None:
                 # Declared shape wins over a possibly stale registry view
                 # (storage reuse freezes first-sighting shapes).
                 expected_shape = [int(s) for s in entry["shape"]]
-                out_t = storages[output_bid][: math.prod(expected_shape)].view(
-                    expected_shape
-                )
+                st, off = _storage_view(output_bid, 0, entry_dt)
+                out_t = st[off : off + math.prod(expected_shape)].view(expected_shape)
             else:
                 n = out_t.numel()
                 out_t = storages[output_bid][:n].view(out_t.shape)

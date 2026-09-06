@@ -460,6 +460,27 @@ def test_finalize_collapses_autotune_runs_per_call_site():
     assert [a.get("buffer_id") for a in sink.entries[2].args] == [6, 7]
 
 
+def test_call_site_traces_drops_leading_storm_across_runs():
+    """A benchmark storm on a scratch buffer has a different arg
+    fingerprint than its site's production launch, so the storm's last
+    launch survives per-run segmenting as an extra candidate. The
+    trailing-n selection must therefore span ALL runs of a symbol —
+    otherwise the storm candidate shifts every call site onto the wrong
+    trace (cross-wired buffer ids; MetaFormer gelu_10 regression: 36
+    scratch launches + 4 production launches for 4 sites)."""
+    launches = [
+        _launch_entry("k0", (50,)),  # storm benchmark on scratch
+        _launch_entry("k0", (50,)),
+        _launch_entry("k0", (50,)),
+        _launch_entry("k0", (1,)),  # site A production
+        _launch_entry("k1", (9,)),
+        _launch_entry("k0", (2,)),  # site B production
+    ]
+    entries = _call_site_traces(launches, {"k0": 2, "k1": 1})
+    k0 = [e for e in entries if e.symbol == "k0"]
+    assert [[a["buffer_id"] for a in e.args] for e in k0] == [[1], [2]]
+
+
 def test_finalize_pipeline_seeds_each_call_site_from_own_trace():
     """With per-call-site trace queues, each pipeline occurrence of a
     symbol is seeded from its own trace — no cross-wired buffer ids, no
@@ -870,10 +891,12 @@ def test_call_site_traces_keeps_last_of_identical_fingerprint_run():
         _launch_entry("k0", (6, 7)),  # site B production
     ]
     out = _call_site_traces(launches, {"k0": 2, "k1": 1})
+    # Entries are grouped per symbol (the consumer builds per-symbol
+    # queues); within a symbol, launch order is preserved.
     assert [(e.symbol, e.args[0].get("buffer_id")) for e in out] == [
         ("k0", 3),
-        ("k1", 5),
         ("k0", 6),
+        ("k1", 5),
     ]
     assert out[0].grid == (2, 1, 1)  # last of the segment wins
 

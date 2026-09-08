@@ -744,9 +744,13 @@ def _call_site_traces(
     and the pipeline's per-symbol step count selects the trailing
     candidates — dropping pure-benchmark segments (scratch-buffer
     benchmarks of a site whose production launch carries different
-    args). Symbols with no pipeline steps contribute no traces.
+    args). The trailing-n selection spans ALL runs of a symbol (a symbol
+    recurs as separate runs whenever other symbols interleave between its
+    call sites): selecting per run instead would keep a leading
+    storm candidate and shift every site onto the wrong trace. Symbols
+    with no pipeline steps contribute no traces.
     """
-    entries: list[LaunchTraceEntry] = []
+    cands_by_symbol: dict[str, list[LaunchTraceEntry]] = {}
     for symbol, grp in groupby(all_launches, key=lambda e: e.symbol):
         run = list(grp)
         cands: list[LaunchTraceEntry] = []
@@ -759,6 +763,9 @@ def _call_site_traces(
             prev_fp, prev = fp, e
         if prev is not None:
             cands.append(prev)
+        cands_by_symbol.setdefault(symbol, []).extend(cands)
+    entries: list[LaunchTraceEntry] = []
+    for symbol, cands in cands_by_symbol.items():
         n = step_counts.get(symbol, 0)
         if n:
             entries.extend(cands[-n:])
